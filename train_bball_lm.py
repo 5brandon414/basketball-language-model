@@ -13,7 +13,10 @@ import torch.nn as nn
 
 DATA = "data"
 OUT = Path("ckpt")
-MAXLEN = 688    # covers the longest (multi-OT) game in the corpus
+MAXLEN = 688    # longest corpus game is 671 tokens (multi-OT); the margin
+                # above it is headroom for generated rollouts. A learned
+                # positional table makes this a checkpoint dimension; the
+                # trainer aborts if any game exceeds it.
 # time-to-next-event bins (seconds)
 DT_BOUNDS = [1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 17, 20, 24, 28, 33]
 DT_MID = np.array([0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 7, 9, 11, 13, 15.5, 18.5,
@@ -322,6 +325,14 @@ def main():
 
     blob = load_corpus(a.data_dir)
     games, vocab = blob["games"], blob["vocab"]
+    longest = max(len(g["tok"]) for g in games.values())
+    if longest > MAXLEN:
+        raise SystemExit(
+            f"ABORT: longest game is {longest} tokens > MAXLEN {MAXLEN} — "
+            f"training would silently truncate it. Re-run with "
+            f"--maxlen {longest + 32} or higher.")
+    print(f"longest game {longest} tokens (MAXLEN {MAXLEN}: fits, with "
+          f"{MAXLEN - longest} tokens of rollout headroom)", flush=True)
     for gid, g in games.items():
         g["season"] = str(gid)[3:5]
         g["gid"] = str(gid)
