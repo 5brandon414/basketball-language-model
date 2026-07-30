@@ -59,6 +59,30 @@ def make_rater(ck, pvocab):
 
 
 @torch.no_grad()
+def kv_prefill(model, xseq):
+    """Multi-token cache build (the prefix pass): same math as the full
+    causal forward, returns per-layer (K,V) caches + last hidden state."""
+    x = xseq
+    P = x.shape[1]
+    mask = torch.triu(torch.full((P, P), float("-inf"), device=x.device), 1)
+    caches = []
+    for layer in model.tr.layers:
+        sa = layer.self_attn
+        d = x.shape[-1]; nh = sa.num_heads; hd = d // nh
+        h = layer.norm1(x)
+        qkv = torch.nn.functional.linear(h, sa.in_proj_weight, sa.in_proj_bias)
+        q, k, v = qkv.chunk(3, -1)
+        caches.append((k, v))
+        B, T, _ = k.shape
+        qh = q.view(B, T, nh, hd).transpose(1, 2)
+        kh = k.view(B, T, nh, hd).transpose(1, 2)
+        vh = v.view(B, T, nh, hd).transpose(1, 2)
+        at = (torch.softmax(qh @ kh.transpose(-1, -2) / hd ** 0.5 + mask, -1) @ vh)
+        x = x + sa.out_proj(at.transpose(1, 2).reshape(B, T, d))
+        x = x + layer.linear2(layer.activation(layer.linear1(layer.norm2(x))))
+    return caches, x[:, -1:]
+
+
 def kv_step(model, caches, xn):
     """One-token transformer step with projected K/V caching.
     xn: [K,1,d] input embedding for the new position."""
@@ -140,6 +164,7 @@ def rollout_batch(model, pvocab, timeline, gen, K, port, dev, window=0,
         cur_i[:] = np.clip(np.searchsorted(ts_arr, prefix["t0"], side="right") - 1,
                            0, n_st - 1)
 
+    caches = None      # kv: built at j==0, or prefilled over a real prefix
     while (~done).any() and T < MAXLEN - 1:
         j = T - 1        # conditioning row for the position being predicted
         idx = np.clip(np.searchsorted(ts_arr, t, side="right") - 1, 0, n_st - 1)
@@ -171,16 +196,24 @@ def rollout_batch(model, pvocab, timeline, gen, K, port, dev, window=0,
                                  dtype=torch.float32, device=dev)
 
         if kv:
+            def emb_range(lo_, hi_):
+                ph_ = model.pfuse(torch.cat([model.pemb(h5B[:, lo_:hi_]),
+                                             hmB[:, lo_:hi_].unsqueeze(-1),
+                                             hrB[:, lo_:hi_]], -1))
+                pa_ = model.pfuse(torch.cat([model.pemb(a5B[:, lo_:hi_]),
+                                             amB[:, lo_:hi_].unsqueeze(-1),
+                                             arB[:, lo_:hi_]], -1))
+                lu_ = model.lineup(torch.cat([ph_.sum(2), pa_.sum(2)], -1))
+                pos_ = model.pos.weight[
+                    torch.arange(lo_, hi_, device=dev).clamp(max=MAXLEN - 1)]
+                return (model.tok(tokB[:, lo_:hi_]) + pos_[None] + lu_
+                        + model.ctx(torch.stack([ckB[:, lo_:hi_],
+                                                 sdB[:, lo_:hi_]], -1)))
             if j == 0:
                 caches = [None] * len(model.tr.layers)
-            ph = model.pfuse(torch.cat([model.pemb(h5B[:, j]),
-                                        hmB[:, j].unsqueeze(-1), hrB[:, j]], -1))
-            pa = model.pfuse(torch.cat([model.pemb(a5B[:, j]),
-                                        amB[:, j].unsqueeze(-1), arB[:, j]], -1))
-            lu = model.lineup(torch.cat([ph.sum(1), pa.sum(1)], -1))
-            xn = (model.tok(tokB[:, j]) + model.pos.weight[min(j, MAXLEN - 1)][None]
-                  + lu + model.ctx(torch.stack([ckB[:, j], sdB[:, j]], -1)))
-            hid = kv_step(model, caches, xn.unsqueeze(1))
+            elif caches is None:      # prefix run: build the cache once
+                caches, _ = kv_prefill(model, emb_range(0, j))
+            hid = kv_step(model, caches, emb_range(j, j + 1))
             lg = model.head(hid)[:, 0].float().cpu()
             dl = model.dt_head(hid)[:, 0].float().cpu()
         else:
@@ -244,12 +277,13 @@ def rollout_batch(model, pvocab, timeline, gen, K, port, dev, window=0,
 
 @torch.no_grad()
 def rollout_lmsubs(model, pvocab, game, gen, K, port, dev, window=0, rate=None, season="*",
-                   exit_temp=1.0, ent_temp=1.0):
-    """The LM drives its own rotations. Lineups start at the real
-    starters; every sampled SUB token triggers the exit pointer (who comes
-    Returns scores + per-player
-    simulated seconds for the minutes gate."""
-    R = 13
+                   exit_temp=1.0, ent_temp=1.0, prefix=None, kv=False):
+    """The LM drives its own rotations. Lineups start at the real starters
+    (or, with a prefix, the real halftime lineup); every sampled SUB token
+    triggers the exit pointer (who comes off) and the entrant pointer (who
+    checks in). Returns scores + per-player simulated seconds."""
+    R = 17    # available-roster width
+    _dump = False   # debug hook used only by rollout_batch
     # starters first
     def order(ids, starters):
         st = [str(p) for p in starters]
@@ -292,14 +326,47 @@ def rollout_lmsubs(model, pvocab, game, gen, K, port, dev, window=0, rate=None, 
     done = np.zeros(K, bool)
     hmin = np.zeros((K, R)); amin = np.zeros((K, R))
     hon = np.repeat(hon0[None], K, 0); aon = np.repeat(aon0[None], K, 0)
-    tgt_h = np.zeros(K); tgt_a = np.zeros(K)
-    def prices(honk, aonk):
-        h5_ = tuple(sorted(str(hro_ids[i]) for i in np.where(honk)[0]))
-        a5_ = tuple(sorted(str(aro_ids[i]) for i in np.where(aonk)[0]))
-        key = (h5_, a5_)
-        return price.get(key, (0.0, 0.0))
-
     T = 1
+    if prefix is not None:
+        # halftime start: condition on the REAL first half (observed), then
+        # the LM drives every H2 rotation itself — no oracle timeline
+        P = len(prefix["tok"])
+        tokB[:, :P] = torch.tensor(prefix["tok"], dtype=torch.long,
+                                   device=dev)[None]
+        h5B[:, :P] = torch.tensor(prefix["h5"], dtype=torch.long, device=dev)[None]
+        a5B[:, :P] = torch.tensor(prefix["a5"], dtype=torch.long, device=dev)[None]
+        hmB[:, :P] = torch.tensor(np.array(prefix["hm"]), dtype=torch.float32,
+                                  device=dev)[None]
+        amB[:, :P] = torch.tensor(np.array(prefix["am"]), dtype=torch.float32,
+                                  device=dev)[None]
+        hrB[:, :P] = torch.tensor(np.array([[rate(str(p), season) for p in row]
+                                            for row in prefix["h5_raw"]]),
+                                  dtype=torch.float32)
+        arB[:, :P] = torch.tensor(np.array([[rate(str(p), season) for p in row]
+                                            for row in prefix["a5_raw"]]),
+                                  dtype=torch.float32)
+        ckB[:, :P] = torch.tensor(prefix["ck"], dtype=torch.float32, device=dev)[None]
+        sdB[:, :P] = torch.tensor(prefix["sd"], dtype=torch.float32, device=dev)[None]
+        # roster-space prefix rows, permuted sorted-order -> starters-first
+        srt_h = [str(p) for p in game["hro"]]; srt_a = [str(p) for p in game["aro"]]
+        perm_h = [srt_h.index(p) for p in hro_ids]
+        perm_a = [srt_a.index(p) for p in aro_ids]
+        hm13_p = np.zeros((P, R), np.float32); am13_p = np.zeros((P, R), np.float32)
+        hm13_p[:, :nh] = game["hm13"][:P][:, perm_h]
+        am13_p[:, :na] = game["am13"][:P][:, perm_a]
+        hm13B[:, :P] = torch.tensor(hm13_p, device=dev)
+        am13B[:, :P] = torch.tensor(am13_p, device=dev)
+        hon_p = np.stack([slots_of(row, hro_ids) for row in prefix["h5_raw"]])
+        aon_p = np.stack([slots_of(row, aro_ids) for row in prefix["a5_raw"]])
+        honB[:, :P] = torch.tensor(hon_p, dtype=torch.float32, device=dev)
+        aonB[:, :P] = torch.tensor(aon_p, dtype=torch.float32, device=dev)
+        # sim state entering H2: real halftime lineup, banked minutes, score
+        t[:] = prefix["t0"]; hp[:] = prefix["h0"]; ap[:] = prefix["a0"]
+        hon[:] = hon_p[-1][None]; aon[:] = aon_p[-1][None]
+        hmin[:] = hm13_p[-1][None] * 2880.0; amin[:] = am13_p[-1][None] * 2880.0
+        T = P
+
+    caches = None      # kv: built at j==0, or prefilled over the real prefix
     while (~done).any() and T < MAXLEN - 1:
         j = T - 1
         for k in range(K):
@@ -317,14 +384,54 @@ def rollout_lmsubs(model, pvocab, game, gen, K, port, dev, window=0, rate=None, 
         sdB[:, j] = torch.tensor(np.clip((hp - ap) / 20.0, -2, 2),
                                  dtype=torch.float32, device=dev)
 
-        lo = max(0, T - window) if window else 0
-        logits, dtl, actl, enth, enta = model(
-            tokB[:, lo:T], h5B[:, lo:T], a5B[:, lo:T], ckB[:, lo:T],
-            hmB[:, lo:T], amB[:, lo:T], sdB[:, lo:T], hrB[:, lo:T], arB[:, lo:T],
-            hroB, aroB, hr13B, ar13B, hm13B[:, lo:T], am13B[:, lo:T],
-            honB[:, lo:T], aonB[:, lo:T], pos_offset=lo)
-        lg = logits[:, -1].float().cpu()
-        dl = dtl[:, -1].float().cpu()
+        if kv:
+            def emb_range(lo_, hi_):
+                ph_ = model.pfuse(torch.cat([model.pemb(h5B[:, lo_:hi_]),
+                                             hmB[:, lo_:hi_].unsqueeze(-1),
+                                             hrB[:, lo_:hi_]], -1))
+                pa_ = model.pfuse(torch.cat([model.pemb(a5B[:, lo_:hi_]),
+                                             amB[:, lo_:hi_].unsqueeze(-1),
+                                             arB[:, lo_:hi_]], -1))
+                lu_ = model.lineup(torch.cat([ph_.sum(2), pa_.sum(2)], -1))
+                pos_ = model.pos.weight[
+                    torch.arange(lo_, hi_, device=dev).clamp(max=MAXLEN - 1)]
+                return (model.tok(tokB[:, lo_:hi_]) + pos_[None] + lu_
+                        + model.ctx(torch.stack([ckB[:, lo_:hi_],
+                                                 sdB[:, lo_:hi_]], -1))), ph_, pa_
+            if j == 0:
+                caches = [None] * len(model.tr.layers)
+                xr, ph1, pa1 = emb_range(0, 1)
+            elif caches is None:      # prefix run: build the cache once
+                xall, _, _ = emb_range(0, j)
+                caches, _ = kv_prefill(model, xall)
+                xr, ph1, pa1 = emb_range(j, j + 1)
+            else:
+                xr, ph1, pa1 = emb_range(j, j + 1)
+            hid = kv_step(model, caches, xr)
+            x1 = hid[:, 0]
+            lg = model.head(hid)[:, 0].float().cpu()
+            dl = model.dt_head(hid)[:, 0].float().cpu()
+            # pointer heads at position j — exact replica of forward's math
+            cands = torch.cat([ph1[:, 0], pa1[:, 0]], 1)
+            actl_1 = torch.einsum("kd,knd->kn", model.actor_q(x1), cands)
+            q1 = model.ent_q(x1)
+            def bench1(ro, r13, m13_j, on_j):
+                pv = model.pfuse(torch.cat([model.pemb(ro),
+                                            m13_j.unsqueeze(-1), r13], -1))
+                lg_ = torch.einsum("kd,krd->kr", q1, pv)
+                return lg_.masked_fill((ro == 0) | (on_j > 0.5), -1e9)
+            act_lg_full = actl_1.float().cpu()
+            eh_full = bench1(hroB, hr13B, hm13B[:, j], honB[:, j]).float().cpu()
+            ea_full = bench1(aroB, ar13B, am13B[:, j], aonB[:, j]).float().cpu()
+        else:
+            lo = max(0, T - window) if window else 0
+            logits, dtl, actl, enth, enta = model(
+                tokB[:, lo:T], h5B[:, lo:T], a5B[:, lo:T], ckB[:, lo:T],
+                hmB[:, lo:T], amB[:, lo:T], sdB[:, lo:T], hrB[:, lo:T], arB[:, lo:T],
+                hroB, aroB, hr13B, ar13B, hm13B[:, lo:T], am13B[:, lo:T],
+                honB[:, lo:T], aonB[:, lo:T], pos_offset=lo)
+            lg = logits[:, -1].float().cpu()
+            dl = dtl[:, -1].float().cpu()
         pt = torch.softmax(lg, -1)
         pt[:, VIDX["PAD"]] = 0; pt[:, VIDX["BOS"]] = 0
         nxt = torch.multinomial(pt / pt.sum(1, keepdim=True), 1,
@@ -348,8 +455,11 @@ def rollout_lmsubs(model, pvocab, game, gen, K, port, dev, window=0, rate=None, 
                     aslot = int(torch.multinomial(ps_, 1, generator=gen))
                     assist_id[k] = int(five[aslot])
             _dumpA.append(actor_id); _dumpS.append(assist_id)
-        act_lg = actl[:, -1].float().cpu()
-        eh_lg = enth[:, -1].float().cpu(); ea_lg = enta[:, -1].float().cpu()
+        if kv:
+            act_lg = act_lg_full; eh_lg = eh_full; ea_lg = ea_full
+        else:
+            act_lg = actl[:, -1].float().cpu()
+            eh_lg = enth[:, -1].float().cpu(); ea_lg = enta[:, -1].float().cpu()
 
         nxt[done] = VIDX["PAD"]
         alive = ~done
@@ -380,8 +490,6 @@ def rollout_lmsubs(model, pvocab, game, gen, K, port, dev, window=0, rate=None, 
         dt_s = DT_MEANS[dtb]
         for k in np.where(act)[0]:
             hmin[k, hon[k]] += dt_s[k]; amin[k, aon[k]] += dt_s[k]
-            rh, ra = prices(hon[k], aon[k])
-            tgt_h[k] += rh * dt_s[k] / 14.9; tgt_a[k] += ra * dt_s[k] / 14.9
         t[act] += dt_s[act]
         done |= newly_eos | (t >= 2880.0)
         tokB[:, T] = torch.tensor(nxt, dtype=torch.long, device=dev)
@@ -403,7 +511,8 @@ def main():
                     help="the LM drives its own rotations")
     ap.add_argument("--window", type=int, default=0,
                     help="attend to only the last W events (0 = full)")
-    ap.add_argument("--split", default="test", choices=["test", "val"])
+    ap.add_argument("--split", default="test",
+                    choices=["test", "val", "ttest"])
     ap.add_argument("--kv", action="store_true",
                     help="KV-cached generation (exact; pre-state only for now)")
     ap.add_argument("--gids-file", default=None, help="restrict to game_ids listed in file")
@@ -440,6 +549,10 @@ def main():
     if a.gids_file:
         keep = set(open(a.gids_file).read().split())
         stints = stints[stints.game_id.isin(keep)]
+    if a.state == "half" and not a.lm_subs:
+        print("WARNING: oracle-timeline mode — simulated lineups replay the "
+              "REAL second-half rotation (future information). Diagnostic "
+              "only; the paper's halftime numbers use --lm-subs.", flush=True)
     rows = []
     all_m3, all_mf = [], []   # per-rollout Q3/final margins (lead erosion)
     for n_g, (gid, g) in enumerate(stints.groupby("game_id", sort=False)):
@@ -477,22 +590,24 @@ def main():
             if gd is None: continue
             hpv, apv, hmn, amn, hid, aid = rollout_lmsubs(
                 model, pvocab, gd, gen, a.rollouts, port, dev, window=a.window,
-                rate=rate, season=season)
-            act_h = np.zeros(len(hid)); act_a = np.zeros(len(aid))
-            for r_ in g.itertuples(index=False):
-                for p in r_.home_lineup:
-                    if str(p) in hid: act_h[hid.index(str(p))] += r_.duration_sec
-                for p in r_.away_lineup:
-                    if str(p) in aid: act_a[aid.index(str(p))] += r_.duration_sec
-            mmae = (np.abs(hmn.mean(0)[:len(hid)] - act_h).mean()
-                    + np.abs(amn.mean(0)[:len(aid)] - act_a).mean()) / 2 / 60.0
+                rate=rate, season=season, prefix=prefix, kv=a.kv)
+            if prefix is None:      # full-game minutes gate (pregame only)
+                act_h = np.zeros(len(hid)); act_a = np.zeros(len(aid))
+                for r_ in g.itertuples(index=False):
+                    for p in r_.home_lineup:
+                        if str(p) in hid: act_h[hid.index(str(p))] += r_.duration_sec
+                    for p in r_.away_lineup:
+                        if str(p) in aid: act_a[aid.index(str(p))] += r_.duration_sec
+                mmae = (np.abs(hmn.mean(0)[:len(hid)] - act_h).mean()
+                        + np.abs(amn.mean(0)[:len(aid)] - act_a).mean()) / 2 / 60.0
+            else:
+                mmae = np.nan
             ev = np.zeros(1); ft = np.zeros(1); early = np.zeros(1)
         else:
             hpv, apv, ev, ft, early, m3s = rollout_batch(
                 model, pvocab, timeline, gen, a.rollouts, port, dev,
                 window=a.window, prefix=prefix,
-                rate=rate, season=season, sd_scale=a.sd_scale,
-                kv=a.kv and prefix is None)
+                rate=rate, season=season, sd_scale=a.sd_scale, kv=a.kv)
             all_m3.extend(m3s.tolist()); all_mf.extend((hpv - apv).tolist())
             mmae = np.nan
         if rows and len(rows) % 10 == 0:

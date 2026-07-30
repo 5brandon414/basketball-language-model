@@ -21,23 +21,28 @@ python >= 3.9; `pip install -r requirements.txt`.
 python3 train_bball_lm.py --epochs 40 --maxlen 688 --card player_card.parquet \
     --ast-w 0.3 --sr-w 0.3 --mh-w 1.5 --pw-w 0.3 --mh-wpool --sd-drop 0.3 \
     --seed 7 --data-dir <dataset> --out ckpt/
-python3 generate_bball_lm.py --games 200 --rollouts 24 --split test \
-    --state half --seed 7 --data-dir <dataset> --ckpt ckpt/best_model.pt
+python3 generate_bball_lm.py --games 500 --rollouts 24 --split test \
+    --state half --lm-subs --kv --seed 7 --data-dir <dataset> \
+    --ckpt ckpt/best_model.pt        # the paper's halftime configuration
 python3 eval_margin_head.py --ckpt ckpt/best_model.pt --data-dir <dataset>
+# optional variance-shrink tooling (paper coverage is raw); needs pregame
+# rollouts on val+test first (--state pre --split val / test):
 python3 d_lite_calibrate.py ckpt/
 ```
 
-## Expected metrics (frozen 699-game test split)
+## Expected metrics (frozen 500-game test split)
 | Metric | Value |
 |---|---|
-| Next-event perplexity, 16 classes (LM / bigram) | 4.00 / 5.45 |
-| Pregame margin corr / winner acc / MAE | 0.490 / 68.0% / 10.47 |
-| Halftime margin corr / winner acc / MAE | 0.686 / 73.7% / 8.75 |
-| Rotation minutes MAE (LM / naive habit) | 5.21 / 5.47 |
-| Calibration coverage (margins & totals) | within ±5pp |
+| Next-event perplexity, 16 classes (LM / bigram) | 4.01 / 5.44 |
+| Pregame margin corr / winner acc / MAE | 0.509 / 65.0% / 10.54 |
+| Halftime margin corr / winner acc / MAE | 0.690 / 74.6% / 8.84 |
+| Game totals corr (halftime) | 0.707 |
+| Calibration coverage (raw sampling) | margins ±3pp, totals ±7pp |
 
-Halftime figures use raw sampling (this release has no generation-time
-steering); they match the steered run within noise. Numbers are the
-frozen-699 test split.
+Halftime figures use raw sampling with the model driving its own
+substitutions (`--lm-subs`) — no steering, and the real second-half
+rotations are never consulted. The model's information is the public
+pregame state (available roster, starters, strictly-before statistics)
+plus, at halftime, the observed first half.
 
 MIT licensed. File-by-file provenance in MANIFEST.md.

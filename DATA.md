@@ -29,29 +29,41 @@ Per side S in {H (home), A (away)}:
 | clock | elapsed game time / 2880 (OT clipped at 3600s) |
 | sdiff | running score diff (home-away)/20, clipped to [-2, 2] |
 | actor | on-court slot of the acting player: 0-4 home, 5-9 away, -100 n/a |
-| entrant | roster index (0-12) of the incoming player on SUB rows, -100 n/a |
+| entrant | roster index (0-16, into the sorted available roster) of the incoming player on SUB rows, -100 n/a |
 | assister | on-court slot of the assisting teammate on _MAKE_AST rows, -100 n/a |
 
 ## Model clock bins (dt discretization used in training)
 Bin edges (seconds): [1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 17, 20, 24, 28, 33];
 de-binned at generation with empirical per-bin medians fit on train.
 
+## Information contract (what the model may know)
+Pregame the model knows (1) the set of players AVAILABLE to play (the
+dressed active list, fixed before tip), (2) the starters, and (3) player
+statistics computed strictly before that game. It never observes who
+actually enters off the bench or anyone's minutes — those are generated.
+The available roster is outcome-independent (its size is uncorrelated with
+the final margin, r = -0.01, versus r = 0.58 for the appeared roster).
+
 ## Conditioning fields (reconstructed by loader.py)
 Per token: the ten on-court player ids (5 home + 5 away, from
 lineups.parquet by elapsed time), each player's cumulative minutes so far,
-13-man roster ids per side (first 13 distinct players by id order), roster
-cumulative minutes, and the score/clock scalars above.
+the available roster per side (up to 17 ids, sorted; from rosters.parquet),
+roster cumulative minutes, and the score/clock scalars above.
 
 ## Other files
 - `lineups.parquet`: game_id, t_start_sec, duration_sec, home_lineup,
   away_lineup (arrays of player-id strings) — lineup-stint timeline.
-- `player_card.parquet`: per (player_id, key) rows; key = game id (as-of
-  values strictly before that game), season ("16".."25"), or "*" (career).
-  15 z-scored dials (scoring, playmaking, rebounding, shooting, size,
-  minutes, experience, recent form, availability, defense, ball security,
-  impact). Lookup chain: game -> season -> career.
+- `rosters.parquet`: game_id, home_available, away_available — the pregame
+  active (dressed) lists: everyone who played plus everyone in uniform who
+  did not, excluding inactive/did-not-dress/not-with-team designations.
+- `player_card.parquet`: per (player_id, game_id) rows only; 15 z-scored
+  dials (scoring, playmaking, rebounding, shooting, size, minutes,
+  experience, recent form, availability, defense, ball security, impact),
+  each the player's most recent state strictly before that game night.
+  A missing row means no prior NBA appearances; consumers use zeros (the
+  z-scored league mean).
 - `players.csv`: player_id -> display name.
-- `splits.json` / games_*.txt: train / val / test (frozen 699) / ttest
-  (temporal holdout: chronologically last 200 train-era games of 2025-26).
+- `splits.json`: train / val / test (frozen 500) / ttest (temporal holdout:
+  chronologically last 200 train-era games of 2025-26).
 
 License: MIT (code); data derives from publicly available NBA.com endpoints.

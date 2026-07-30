@@ -9,8 +9,8 @@
 - `print_bball_game.py` — render any game's token stream as readable play-by-play (names via players.csv).
 
 ## Experiments (paper Tables 1-2 reproduction)
-- `experiments/table1_margins.py` — margin/total: Elo, halftime-lead, GB, LM.
-- `experiments/table2_nextevent.py` — next-event: unigram, bigram, GB, LM (class-level, difficulty-stratified).
+- `experiments/table2_margins.py` — margin/total: Elo, halftime-lead, GB, LM.
+- `experiments/table1_nextevent.py` — next-event: unigram, bigram, GB, LM (class-level, difficulty-stratified).
 - `experiments/_common.py` — shared loaders + significance. `experiments/README.md` — how to run.
 
 ## Data (small, git-appropriate)

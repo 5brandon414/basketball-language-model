@@ -40,18 +40,15 @@ def to_class_dist(p, tok2cls, NC):
 
 
 def load_card(data_dir):
-    """15-dial as-of player card with the (pid,game)->(pid,season)->(pid,'*')
-    fallback chain. Returns rate(pid, gid) -> np.array(15)."""
+    """15-dial as-of player card, per-(pid,game) rows only; a miss returns
+    zeros (the z-scored league mean). Returns rate(pid, gid) -> np.array(15)."""
     pc = pd.read_parquet(os.path.join(data_dir, "player_card.parquet"))
     dcols = [c for c in pc.columns if c.startswith("card_")]
     lut = {(str(r.player_id), str(r.key)): np.array([getattr(r, c) for c in dcols])
            for r in pc.itertuples(index=False)}
     P = len(dcols)
     def rate(pid, gid):
-        pid = str(pid); s = str(gid)[3:5]
-        v = lut.get((pid, str(gid)))
-        if v is None: v = lut.get((pid, s))
-        if v is None: v = lut.get((pid, "*"))
+        v = lut.get((str(pid), str(gid)))
         return v if v is not None else np.zeros(P)
     return rate, P
 

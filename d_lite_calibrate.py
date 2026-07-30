@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Fit the distribution variance-shrink on val rollouts; report test coverage.
 
+Optional deployment tooling: the paper's coverage numbers are RAW sampling
+(no shrink applied). The fit uses val only; test is report-only.
+
   python3 d_lite_calibrate.py <ckpt_dir>
 """
 import sys

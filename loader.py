@@ -12,6 +12,12 @@ def load_corpus(data_dir):
     splits = json.load(open(os.path.join(data_dir, "splits.json")))
     lu = pd.read_parquet(os.path.join(data_dir, "lineups.parquet"))
     lu_by_game = {g: d.sort_values("t_start_sec") for g, d in lu.groupby("game_id")}
+    # pregame available rosters (dressed lists) — the model may know who is
+    # available and who starts, never who actually enters or their minutes
+    ros = pd.read_parquet(os.path.join(data_dir, "rosters.parquet"))
+    avail = {r.game_id: (sorted(str(p) for p in r.home_available),
+                         sorted(str(p) for p in r.away_available))
+             for r in ros.itertuples(index=False)}
     games = {}
     for f in sorted(glob.glob(os.path.join(data_dir, "events_*.parquet"))):
         for gid, g in pd.read_parquet(f).groupby("game_id"):
@@ -25,9 +31,9 @@ def load_corpus(data_dir):
             AL = [np.array([str(p) for p in x]) for x in st.away_lineup]
             el = g.clock.to_numpy(float) * 2880.0
             idx = np.clip(np.searchsorted(ts, el, side="right") - 1, 0, len(ts) - 1)
-            R = 13
-            hro = sorted({p for f5 in HL for p in f5})[:R]
-            aro = sorted({p for f5 in AL for p in f5})[:R]
+            R = 17
+            hro, aro = avail[gid]
+            hro, aro = list(hro)[:R], list(aro)[:R]
             base, stint_base = {}, []
             for i in range(len(ts)):
                 stint_base.append({p: base.get(p, 0.0)

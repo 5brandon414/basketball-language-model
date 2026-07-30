@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Paper Table 2 — next-event prediction: LM vs historical/bigram/GB.
 
-  python3 experiments/table2_nextevent.py --data-dir <dataset> --ckpt <best_model.pt>
+  python3 experiments/table1_nextevent.py --data-dir <dataset> --ckpt <best_model.pt>
 """
 import argparse
 import numpy as np
@@ -99,7 +99,7 @@ if a.ckpt:
 def acc(p, mk=None): return (p[tc == tc] == tc).mean() if mk is None else (p[mk] == tc[mk]).mean()
 mods = [("Historical avg", U), ("Bigram", B), ("GB (context)", G)] + ([("Basketball LM", LM)] if LM is not None else [])
 med = np.median(H); con = H <= med; opn = H > med
-print("\n=== Table 2: next-event class-level top-1 (stratified by transition difficulty) ===")
+print("\n=== Table 1: next-event class-level top-1 (stratified by transition difficulty) ===")
 print(f"{'model':16s}  All     Constrained  Open")
 for nm, p in mods:
     print(f"{nm:16s}  {acc(p):.1%}   {acc(p,con):.1%}        {acc(p,opn):.1%}")

@@ -13,7 +13,7 @@ import torch.nn as nn
 
 DATA = "data"
 OUT = Path("ckpt")
-MAXLEN = 640
+MAXLEN = 688    # covers the longest (multi-OT) game in the corpus
 # time-to-next-event bins (seconds)
 DT_BOUNDS = [1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 17, 20, 24, 28, 33]
 DT_MID = np.array([0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 7, 9, 11, 13, 15.5, 18.5,
@@ -38,7 +38,7 @@ class GameDataset(torch.utils.data.Dataset):
         self.port = port
 
     def _rate(self, pid, season, gid=None):
-        # card lookup: per-game -> season -> career -> pad
+        # card lookup: per-(player, game) as-of row; a miss = zeros
         r = (self.rlut.get((pid, gid)) or self.rlut.get((pid, season))
              or self.rlut.get((pid, "*")) or ())
         return (tuple(r) + (0.0,) * self.port)[: self.port]
@@ -61,7 +61,7 @@ class GameDataset(torch.utils.data.Dataset):
         if "actor" in d: ac[:T] = d["actor"][:T]
         asl = np.full(MAXLEN, -100, np.int64)
         if "assister" in d: asl[:T] = d["assister"][:T]
-        R = 13
+        R = 17    # available-roster width
         hro = np.zeros(R, np.int64); aro = np.zeros(R, np.int64)
         hm13 = np.zeros((MAXLEN, R), np.float32); am13 = np.zeros((MAXLEN, R), np.float32)
         hr13 = np.zeros((R, self.port), np.float32); ar13 = np.zeros((R, self.port), np.float32)
@@ -284,7 +284,7 @@ def main():
     ap.add_argument("--d", type=int, default=160, help="model width")
     ap.add_argument("--layers", type=int, default=5, help="transformer layers")
     ap.add_argument("--maxlen", type=int, default=0,
-                    help="override MAXLEN (0 = keep 640; ~672 recommended)")
+                    help="override MAXLEN (0 = keep 688, the paper setting)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--sr-w", type=float, default=0.0,
@@ -308,10 +308,11 @@ def main():
     ap.add_argument("--sd-drop", type=float, default=0.0,
                     help="blank the score-diff input for this fraction "
                          "of training games (reduces lead-erosion during generation)")
-    ap.add_argument("--card", nargs="?", const="player_card_v2x.parquet", default="player_card_v2x.parquet",
-                    help="raw-stat player card feed; optional "
-                         "filename in the dataset (bare flag = seasonal card, "
-                         "player_card_v2.parquet = as-of per-game card)")
+    ap.add_argument("--card", nargs="?", const="player_card.parquet",
+                    default="player_card.parquet",
+                    help="player-card parquet in the dataset dir: per-"
+                         "(player, game) as-of rows; a missing row feeds "
+                         "zeros (league mean)")
     a = ap.parse_args()
     global OUT, MAXLEN
     if a.out: OUT = Path(a.out)
@@ -350,29 +351,9 @@ def main():
     print(f"games: train {len(tr)} val {len(va)} test {len(te)} | "
           f"players {len(pvocab)} | vocab {len(vocab)}", flush=True)
 
-    # warm-start embeddings from PCA features
-    import pandas as pd
-    from sklearn.decomposition import PCA
-    try:
-        pf = pd.read_parquet(f"{a.data_dir}/player_features.parquet")
-    except Exception:
-        pf = None
-        print("warm-start features not found — random init", flush=True)
-    warm, hit = None, 0
-    if pf is not None:
-        fcols = [c for c in pf.columns
-                 if c not in ("player_id", "season", "n_seen", "position")]
-        M = np.nan_to_num(pf[fcols].to_numpy(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
-        Z = np.clip((M - M.mean(0)) / (M.std(0) + 1e-6), -5, 5)
-        Z30 = PCA(n_components=30, random_state=0).fit_transform(Z)
-        per = pd.DataFrame(Z30).groupby(pf.player_id.astype(str).values).mean()
-        warm = np.zeros((len(pvocab) + 1, 32), np.float32)
-        for p, i in pvocab.items():
-            ps = str(p)
-            if ps in per.index:
-                warm[i, 2:] = per.loc[ps].to_numpy(np.float32); hit += 1
-        warm[1:] = (warm[1:] - warm[1:].mean(0)) / (warm[1:].std(0) + 1e-6)
-    print(f"warm-start: {hit}/{len(pvocab)} players with features", flush=True)
+    # player embeddings are random-init and learned from the play-by-play
+    # alone — the paper model uses no side features at initialization
+    warm = None
 
     # empirical dt-bin means
     dts, dbs = [], []
@@ -472,8 +453,8 @@ def main():
             en_t = en[:, 1:].clone()
             eh_t = torch.where(is_h & (en_t >= 0), en_t, torch.full_like(en_t, -100))
             ea_t = torch.where(~is_h & (en_t >= 0), en_t, torch.full_like(en_t, -100))
-            loss_e = (ce(enth[:, :-1].reshape(-1, 13), eh_t.reshape(-1)).sum()
-                      + ce(enta[:, :-1].reshape(-1, 13), ea_t.reshape(-1)).sum())
+            loss_e = (ce(enth[:, :-1].reshape(-1, 17), eh_t.reshape(-1)).sum()
+                      + ce(enta[:, :-1].reshape(-1, 17), ea_t.reshape(-1)).sum())
             loss_e = loss_e / max((en_t >= 0).sum(), 1)
             loss = (bal("t", loss_t) + 0.5 * bal("d", loss_d)
                     + 0.5 * bal("a", loss_a) + 0.3 * bal("e", loss_e))

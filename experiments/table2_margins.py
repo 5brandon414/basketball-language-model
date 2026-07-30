@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Paper Table 1 — margin prediction: LM vs Elo, halftime-lead, and GB.
 
-  python3 experiments/table1_margins.py --data-dir <dataset> --ckpt <best_model.pt>
+  python3 experiments/table2_margins.py --data-dir <dataset> --ckpt <best_model.pt>
 """
 import argparse, json, os
 import numpy as np
@@ -109,7 +109,7 @@ def line(nm, p, y):
     p, y = np.asarray(p, float), np.asarray(y, float); ok = ~np.isnan(p)
     p, y = p[ok], y[ok]
     return f"  {nm:16s} corr {np.corrcoef(p,y)[0,1]:.3f} | acc {(np.sign(p)==np.sign(y)).mean():.1%} | MAE {np.abs(p-y).mean():.2f}  (n={len(p)})"
-print("=== TABLE 1: PREGAME MARGIN (frozen test) ===")
+print("=== TABLE 2: PREGAME MARGIN (frozen test) ===")
 print(line("Elo", t.elo, t.margin)); print(line("GB trees", t.gb_pre, t.margin))
 if a.ckpt:
     print(line("LM", t.lm_pre, t.margin))
@@ -120,7 +120,7 @@ if a.ckpt:
     _, lo, hi, sig = boot_corr_diff(j.lm_pre.values, j.gb_pre.values, j.margin.values)
     print(f"  LM-GB  corr diff 95%CI[{lo:+.3f},{hi:+.3f}] {'SIG' if sig else 'n.s.'}")
 
-print("\n=== TABLE 1: HALFTIME MARGIN (frozen test) ===")
+print("\n=== TABLE 2: HALFTIME MARGIN (frozen test) ===")
 print(line("halftime-lead", t.lead, t.margin)); print(line("GB trees", t.gb_half, t.margin))
 if a.lm_half_preds:
     h = pd.read_parquet(a.lm_half_preds)
