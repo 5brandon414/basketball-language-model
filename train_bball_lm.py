@@ -13,6 +13,7 @@ import torch.nn as nn
 
 DATA = "data"
 OUT = Path("ckpt")
+ROSTER_R = 17   # available-roster width (max dressed players per side)
 MAXLEN = 688    # longest corpus game is 671 tokens (multi-OT); the margin
                 # above it is headroom for generated rollouts. A learned
                 # positional table makes this a checkpoint dimension; the
@@ -64,7 +65,7 @@ class GameDataset(torch.utils.data.Dataset):
         if "actor" in d: ac[:T] = d["actor"][:T]
         asl = np.full(MAXLEN, -100, np.int64)
         if "assister" in d: asl[:T] = d["assister"][:T]
-        R = 17    # available-roster width
+        R = ROSTER_R
         hro = np.zeros(R, np.int64); aro = np.zeros(R, np.int64)
         hm13 = np.zeros((MAXLEN, R), np.float32); am13 = np.zeros((MAXLEN, R), np.float32)
         hr13 = np.zeros((R, self.port), np.float32); ar13 = np.zeros((R, self.port), np.float32)
@@ -464,8 +465,8 @@ def main():
             en_t = en[:, 1:].clone()
             eh_t = torch.where(is_h & (en_t >= 0), en_t, torch.full_like(en_t, -100))
             ea_t = torch.where(~is_h & (en_t >= 0), en_t, torch.full_like(en_t, -100))
-            loss_e = (ce(enth[:, :-1].reshape(-1, 17), eh_t.reshape(-1)).sum()
-                      + ce(enta[:, :-1].reshape(-1, 17), ea_t.reshape(-1)).sum())
+            loss_e = (ce(enth[:, :-1].reshape(-1, ROSTER_R), eh_t.reshape(-1)).sum()
+                      + ce(enta[:, :-1].reshape(-1, ROSTER_R), ea_t.reshape(-1)).sum())
             loss_e = loss_e / max((en_t >= 0).sum(), 1)
             loss = (bal("t", loss_t) + 0.5 * bal("d", loss_d)
                     + 0.5 * bal("a", loss_a) + 0.3 * bal("e", loss_e))
