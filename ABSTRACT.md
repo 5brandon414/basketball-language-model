@@ -2,26 +2,26 @@
 
 ## Introduction
 
-Basketball already writes itself down. Every game leaves a transcript:
-hundreds of ordered events in a grammar of its own — a foul sends a
+Basketball already writes itself down. Every game leaves a transcript
+of hundreds of ordered events with a grammar of its own. A foul sends a
 shooter to the line by rule; the play after a timeout is anyone's guess.
 Yet prediction research rarely reads it. Pregame models consume season
 aggregates, in-game models reduce the transcript to score and clock,
 and possession simulators are memoryless by construction. Transformers
 read event streams in baseball (SSAC) and soccer, but none reads, or
 writes, a basketball game whole. The Basketball Language Model does
-both: a decoder-only transformer treats each game as a document and
+both. A decoder-only transformer treats each game as a document and
 each event as a token, then writes the rest, event by event. Repeated
-generations form one joint distribution over endings: win probability,
-margin, total, rotations, and lineup what-ifs.
+generations form one joint distribution over endings, answering win
+probability, margin, total, rotations, and lineup what-ifs.
 
 ## Methods
 
 We tokenize play-by-play from 11,896 games across ten seasons (2016-2025)
 into a 60-symbol vocabulary spanning every recorded event type;
 shots are refined by zone, outcome, and assist. A compact decoder-only transformer reads the entire game so far and
-predicts what happens next: the event, its elapsed time, and the acting
-player, chosen by pointing at the ten on court. On substitutions, a
+predicts the next event, its elapsed time, and the acting player,
+chosen by pointing at the ten on court. On substitutions, a
 second pointer picks who enters from the bench. Player identity
 enters through learned embeddings plus a "knowledge card" of
 season-to-date statistics computed before each game; new players
@@ -41,15 +41,15 @@ gradient-boosted trees tie every pointwise number, so nothing is
 sacrificed for generation. Beyond pointwise models, the rollouts write the full run of play. The
 model drives every substitution itself, never consulting real rotations, and
 per-player minutes and totals (0.707 correlation) fall out of the
-simulation. Calibration holds as sampled: 50/80/90% margin intervals
-cover within ±3 percentage points, totals within ±7.
+simulation. Calibration holds as sampled. Margin intervals at 50/80/90%
+cover within ±3 percentage points and totals within ±7.
 
 Table 1. Next-event prediction, semantic event-class top-1 (16 classes),
-stratified by transition difficulty: a median split on the entropy of the
+stratified by transition difficulty, a median split on the entropy of the
 next class given the prior event. Constrained transitions are the
 play-by-play grammar's near-forced rules (a miss is followed by a
 rebound); Open transitions are genuine basketball decisions.
-Sixteen-class perplexity:
+Sixteen-class perplexity is
 4.01 (LM), 4.61 (GB), 5.44 (bigram), 12.71 (historical). Three-bucket and
 per-class results appear in the paper.
 
@@ -81,7 +81,7 @@ CI excludes zero); all other gaps are not.
 One model does what the separate models did. It predicts the next
 event better than every baseline, and because it can simulate the rest of
 the game from any point, it also gives calibrated forecasts the others
-cannot: margin, minutes, win probability, and lineup what-ifs all come
+cannot. Margin, minutes, win probability, and lineup what-ifs all come
 from the same simulations, so they never contradict each other. A
 gradient-boosted tree can match its point predictions, but cannot produce
 a game. The approach needs nothing but play-by-play, so it works for any
