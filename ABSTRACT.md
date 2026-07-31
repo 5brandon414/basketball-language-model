@@ -2,16 +2,16 @@
 
 ## Introduction
 
-Basketball's play-by-play serves as a transcript of the game.
-It contains hundreds of ordered events with a grammar of their own,
-building up the game sequence by sequence.
-Yet prediction research rarely touches this piece. Pregame models
-consume season aggregates, in-game models reduce it to score and clock,
-and possession simulators are memoryless by construction. Transformers read event streams in
-baseball (SSAC) and soccer, but none reads, or writes, a basketball game whole. 
-We take it to its generative conclusion: the Basketball Language Model,
-a decoder-only transformer that treats the game as a document and each
-event as a token, then generates the rest event by event. Repeated
+Basketball already writes itself down. Every game leaves a transcript:
+hundreds of ordered events in a grammar of its own — a foul sends a
+shooter to the line by rule; the play after a timeout is anyone's guess.
+Yet prediction research rarely reads it. Pregame models consume season
+aggregates, in-game models reduce the transcript to score and clock,
+and possession simulators are memoryless by construction. Transformers
+read event streams in baseball (SSAC) and soccer, but none reads, or
+writes, a basketball game whole. The Basketball Language Model does
+both: a decoder-only transformer treats each game as a document and
+each event as a token, then writes the rest, event by event. Repeated
 generations form one joint distribution over endings: win probability,
 margin, total, rotations, and lineup what-ifs.
 
