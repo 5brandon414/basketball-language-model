@@ -6,10 +6,25 @@ import numpy as np
 import pandas as pd
 
 
-def load_corpus(data_dir):
+def _splits_path(data_dir, splits_file=None):
+    """splits_file overrides the default assignment; the paper's numbers use
+    the walk-forward fold files (fold{1,2,3}_splits.json), where every game
+    after the fold's cutoff that is not one of its 180 test games is labelled
+    'exclude' and therefore never trained on."""
+    if splits_file is None:
+        return os.path.join(data_dir, "splits.json")
+    here = os.path.dirname(os.path.abspath(__file__))
+    for p in (splits_file, os.path.join(data_dir, splits_file),
+              os.path.join(here, splits_file)):
+        if os.path.exists(p):
+            return p
+    raise SystemExit(f"splits file not found: {splits_file}")
+
+
+def load_corpus(data_dir, splits_file=None):
     V = json.load(open(os.path.join(data_dir, "vocab.json")))
     VIDX = {t: i for i, t in enumerate(V)}
-    splits = json.load(open(os.path.join(data_dir, "splits.json")))
+    splits = json.load(open(_splits_path(data_dir, splits_file)))
     lu = pd.read_parquet(os.path.join(data_dir, "lineups.parquet"))
     lu_by_game = {g: d.sort_values("t_start_sec") for g, d in lu.groupby("game_id")}
     # pregame available rosters (dressed lists) — the model may know who is
@@ -72,10 +87,10 @@ def load_corpus(data_dir):
     return {"games": games, "vocab": V}
 
 
-def load_lineup_timeline(data_dir, split=None):
+def load_lineup_timeline(data_dir, split=None, splits_file=None):
     """Per-game stint timeline for generation (t_start, duration, fives)."""
     lu = pd.read_parquet(os.path.join(data_dir, "lineups.parquet"))
-    splits = json.load(open(os.path.join(data_dir, "splits.json")))
+    splits = json.load(open(_splits_path(data_dir, splits_file)))
     lu["split"] = lu.game_id.map(splits)
     if split:
         lu = lu[lu.split == split]

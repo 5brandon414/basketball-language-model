@@ -285,6 +285,10 @@ def main():
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--data-dir", default="../sloan_hf_dataset",
                     help="path to the public dataset directory")
+    ap.add_argument("--splits", default=None,
+                    help="split-assignment JSON overriding splits.json; the "
+                         "paper trains one model per walk-forward fold with "
+                         "fold1/fold2/fold3_splits.json")
     ap.add_argument("--d", type=int, default=160, help="model width")
     ap.add_argument("--layers", type=int, default=5, help="transformer layers")
     ap.add_argument("--maxlen", type=int, default=0,
@@ -309,6 +313,12 @@ def main():
     ap.add_argument("--mh-wpool", action="store_true",
                     help="pool mh/pw roster fusion by softmax(mpg_l10 dial) "
                          "instead of flat mean (needs the 15-dial card)")
+    ap.add_argument("--mh-cardonly", action="store_true",
+                    help="card-only pregame head (the paper's recipe): the "
+                         "margin, win-prob and totals heads see ZEROED player "
+                         "embeddings, so pregame forecasts read the knowledge "
+                         "card alone and are identity-blind by construction; "
+                         "event and pointer heads keep full embeddings")
     ap.add_argument("--sd-drop", type=float, default=0.0,
                     help="blank the score-diff input for this fraction "
                          "of training games (reduces lead-erosion during generation)")
@@ -324,7 +334,9 @@ def main():
     torch.manual_seed(a.seed); np.random.seed(a.seed)
     t0 = time.time()
 
-    blob = load_corpus(a.data_dir)
+    blob = load_corpus(a.data_dir, a.splits)
+    if a.splits:
+        print(f"splits: {a.splits}", flush=True)
     games, vocab = blob["games"], blob["vocab"]
     longest = max(len(g["tok"]) for g in games.values())
     if longest > MAXLEN:
@@ -484,9 +496,13 @@ def main():
             if a.mh_w > 0 or a.pw_w > 0:
                 # margin / win-prob head loss
                 fm = (PTSD[tok] * m).sum(1) / 20.0
-                hf = model.pfuse(torch.cat([model.pemb(hro),
+                # card-only pregame head: identity is withheld from these
+                # heads at train time, so they cannot lean on embeddings
+                _pe = ((lambda i: torch.zeros(*i.shape, 32, device=dev))
+                       if a.mh_cardonly else model.pemb)
+                hf = model.pfuse(torch.cat([_pe(hro),
                      torch.full((*hro.shape, 1), 0.5, device=dev), hr13], -1))
-                af = model.pfuse(torch.cat([model.pemb(aro),
+                af = model.pfuse(torch.cat([_pe(aro),
                      torch.full((*aro.shape, 1), 0.5, device=dev), ar13], -1))
                 hmask = (hro > 0).unsqueeze(-1); amask = (aro > 0).unsqueeze(-1)
                 if a.mh_wpool:
@@ -548,6 +564,7 @@ def main():
                "maxlen": MAXLEN, "card": a.card, "ast_w": a.ast_w,
                "sr_w": a.sr_w, "mh_w": a.mh_w, "sd_drop": a.sd_drop,
                "ls": a.ls, "pw_w": a.pw_w, "mh_wpool": a.mh_wpool,
+               "mh_cardonly": a.mh_cardonly,
                "balance": a.balance},
               open(OUT / "config.json", "w"), indent=2)
     print(f"saved -> {OUT}/ ({time.time()-t0:.0f}s)")

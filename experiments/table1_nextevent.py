@@ -12,12 +12,25 @@ from _common import (load_corpus, class_map, to_class_dist, load_card,
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--data-dir", default="../sloan_hf_dataset")
+ap.add_argument("--splits", default=None,
+                help="split JSON overriding splits.json; use the fold "
+                     "file matching the checkpoint (fold3_splits.json "
+                     "for the released model)")
 ap.add_argument("--ckpt", default=None, help="trained checkpoint; omit to run baselines only")
 ap.add_argument("--gb-sample", type=int, default=900000)
+ap.add_argument("--fit-with-val", action="store_true",
+                help="fit every baseline on train+val, the full pre-cutoff "
+                     "record, as the paper's final tables do")
 a = ap.parse_args()
 
-corpus = load_corpus(a.data_dir); vocab = corpus["vocab"]; V = len(vocab)
+corpus = load_corpus(a.data_dir, a.splits); vocab = corpus["vocab"]; V = len(vocab)
 games = corpus["games"]
+if a.fit_with_val:
+    _n = sum(1 for g in games.values() if g["split"] == "val")
+    for g in games.values():
+        if g["split"] == "val":
+            g["split"] = "train"
+    print(f"fit-with-val: {_n} val games join train for baseline fits")
 tr = [g for g in games.values() if g["split"] == "train"]
 te = [g for g in games.values() if g["split"] == "test"]
 cls, CLS, tok2cls, NC = class_map(vocab)

@@ -503,6 +503,9 @@ def main():
     ap.add_argument("--games", type=int, default=60)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--data-dir", default="../sloan_hf_dataset")
+    ap.add_argument("--splits", default=None,
+                    help="split-assignment JSON overriding splits.json "
+                         "(use the fold file matching the checkpoint)")
     ap.add_argument("--rollouts", type=int, default=24)
     ap.add_argument("--state", default="pre", choices=["pre", "half"])
     ap.add_argument("--ckpt", default=str(CKPT))
@@ -512,7 +515,9 @@ def main():
     ap.add_argument("--window", type=int, default=0,
                     help="attend to only the last W events (0 = full)")
     ap.add_argument("--split", default="test",
-                    choices=["test", "val", "ttest"])
+                    choices=["test", "val", "ttest", "all"],
+                    help="'all' ignores the split label and takes the games "
+                         "listed in --gids-file (how the fold tables are run)")
     ap.add_argument("--kv", action="store_true",
                     help="KV-cached generation (exact; pre-state only for now)")
     ap.add_argument("--gids-file", default=None, help="restrict to game_ids listed in file")
@@ -543,16 +548,19 @@ def main():
 
     blob = None
     if a.state == "half" or a.lm_subs:
-        blob = load_corpus(a.data_dir)["games"]
+        blob = load_corpus(a.data_dir, a.splits)["games"]
 
-    stints = load_lineup_timeline(a.data_dir, a.split)
+    stints = load_lineup_timeline(a.data_dir,
+                                  None if a.split == "all" else a.split,
+                                  a.splits)
     if a.gids_file:
         keep = set(open(a.gids_file).read().split())
         stints = stints[stints.game_id.isin(keep)]
-    if a.state == "half" and not a.lm_subs:
-        print("WARNING: oracle-timeline mode — simulated lineups replay the "
-              "REAL second-half rotation (future information). Diagnostic "
-              "only; the paper's halftime numbers use --lm-subs.", flush=True)
+    if not a.lm_subs:
+        print(f"WARNING: oracle-timeline mode (state={a.state}) — simulated "
+              "lineups replay the REAL rotation timeline (future "
+              "information). Diagnostic only; every number in the paper "
+              "uses --lm-subs.", flush=True)
     rows = []
     all_m3, all_mf = [], []   # per-rollout Q3/final margins (lead erosion)
     for n_g, (gid, g) in enumerate(stints.groupby("game_id", sort=False)):
@@ -570,7 +578,7 @@ def main():
             timeline.append((r.t_start_sec, r.duration_sec, h5, a5,
                              1, rh, ra))
         prefix = None
-        if blob is not None:
+        if a.state == "half" and blob is not None:
             gd = blob.get(gid)
             if gd is None: continue
             ck_arr = gd["clock"]

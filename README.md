@@ -16,33 +16,64 @@ grammar and schemas. Point every script at it with `--data-dir`.
 ## Setup
 python >= 3.9; `pip install -r requirements.txt`.
 
-## Reproduce (seeds pinned; defaults shown)
+## Evaluation design
+The paper evaluates strictly forward in time. Three walk-forward folds cut
+at 2024-12-15, 2025-03-01 and 2025-12-15; each fold trains a model from
+scratch on every game before its cutoff (the last 400 held out for early
+stopping) and tests on the 180 games that follow. Every baseline is refit
+per fold on the same pre-cutoff record. `data/fold{1,2,3}_splits.json`
+carry the assignment (games after a cutoff that are not that fold's test
+games are labelled `exclude` and never trained on) and
+`data/fold{1,2,3}_test_gids.txt` list the test games. Reported numbers
+average the three folds. The released checkpoint is fold 3.
+
+## Reproduce (seeds pinned; fold 3 shown, repeat with 1 and 2)
 ```
-python3 train_bball_lm.py --epochs 40 --maxlen 688 --card player_card.parquet \
-    --ast-w 0.3 --sr-w 0.3 --mh-w 1.5 --pw-w 0.3 --mh-wpool --sd-drop 0.3 \
-    --seed 7 --data-dir <dataset> --out ckpt/
-python3 generate_bball_lm.py --games 500 --rollouts 24 --split test \
+python3 train_bball_lm.py --epochs 40 --maxlen 688 \
+    --card player_card_fold3.parquet --splits data/fold3_splits.json \
+    --ast-w 0.3 --sr-w 0.3 --mh-w 1.5 --pw-w 0.3 --mh-wpool --mh-cardonly \
+    --sd-drop 0.3 --seed 7 --data-dir <dataset> --out ckpt/
+python3 generate_bball_lm.py --rollouts 24 --games 180 --split all \
+    --gids-file data/fold3_test_gids.txt --splits data/fold3_splits.json \
     --state half --lm-subs --kv --seed 7 --data-dir <dataset> \
     --ckpt ckpt/best_model.pt        # the paper's halftime configuration
-python3 eval_margin_head.py --ckpt ckpt/best_model.pt --data-dir <dataset>
+python3 experiments/table1_nextevent.py --data-dir <dataset> \
+    --splits data/fold3_splits.json --fit-with-val --ckpt ckpt/best_model.pt
+python3 experiments/table2_margins.py --data-dir <dataset> \
+    --splits data/fold3_splits.json --fit-with-val --ckpt ckpt/best_model.pt \
+    --lm-half-preds <dataset>/lm_half_preds.parquet
 # optional variance-shrink tooling (paper coverage is raw); needs pregame
-# rollouts on val+test first (--state pre --split val / test):
+# rollouts first (--state pre):
 python3 d_lite_calibrate.py ckpt/
 ```
+These commands reproduce one fold. The paper's tables average the three,
+and its significance tests resample folds jointly, so a single fold's
+printed confidence interval is narrower in scope than the paper's. Run
+all three folds and average to match the reported numbers.
+`--fit-with-val` is the paper's fairness rule, giving every baseline the
+full pre-cutoff record. `--lm-half-preds` supplies the halftime rollout
+predictions shipped with the dataset, produced by the generate command
+above from the fold 3 checkpoint.
 
-## Expected metrics (frozen 500-game test split)
-| Metric | Value |
-|---|---|
-| Next-event perplexity, 16 classes (LM / bigram) | 4.01 / 5.44 |
-| Pregame margin corr / winner acc / MAE | 0.509 / 65.0% / 10.54 |
-| Halftime margin corr / winner acc / MAE | 0.690 / 74.6% / 8.84 |
-| Game totals corr (halftime) | 0.707 |
-| Calibration coverage (raw sampling) | margins ±3pp, totals ±7pp |
+`--mh-cardonly` is part of the paper's recipe, not an option: it makes the
+pregame margin and win-probability heads read the knowledge card alone,
+with player embeddings zeroed, so pregame forecasts carry no learned
+player identity. Omitting it trains a different model.
 
-Halftime figures use raw sampling with the model driving its own
-substitutions (`--lm-subs`) — no steering, and the real second-half
-rotations are never consulted. The model's information is the public
-pregame state (available roster, starters, strictly-before statistics)
-plus, at halftime, the observed first half.
+## Expected metrics (three folds, 540 test games, fold-averaged)
+| Metric | Standard baseline | GB trees | Basketball LM |
+|---|---|---|---|
+| Next-event class top-1 (pooled) | 37.8% (bigram) | 42.6% | 45.0% |
+| Pregame margin corr / acc / MAE | 0.382 / 62.0% / 10.83 | 0.426 / 63.5% / 10.55 | 0.426 / 63.0% / 10.58 |
+| Halftime margin corr / acc / MAE | 0.639 / 70.7% / 9.07 | 0.672 / 71.5% / 8.78 | 0.661 / 72.2% / 8.88 |
+| Game totals corr (halftime) | — | — | 0.721 |
+| Halftime coverage at 50/80/90 (raw) | — | — | 47.0 / 75.4 / 86.3 |
+
+Pregame LM figures come from the card-only roster head; halftime figures
+use raw sampling with the model driving its own substitutions
+(`--lm-subs`), no steering, and the real second-half rotations are never
+consulted. The model's information is the public pregame state (available
+roster, starters, strictly-before statistics) plus, at halftime, the
+observed first half.
 
 MIT licensed. File-by-file provenance in MANIFEST.md.

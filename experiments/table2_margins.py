@@ -13,11 +13,24 @@ from _common import (load_corpus, signed_make_points, load_card, load_game_meta,
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--data-dir", default="../sloan_hf_dataset")
+ap.add_argument("--splits", default=None,
+                help="split JSON overriding splits.json; use the fold "
+                     "file matching the checkpoint (fold3_splits.json "
+                     "for the released model)")
 ap.add_argument("--ckpt", default=None, help="checkpoint for the LM pregame column")
 ap.add_argument("--lm-half-preds", default=None, help="parquet(game_id,pred,actual) from generate --state half")
+ap.add_argument("--fit-with-val", action="store_true",
+                help="fit every baseline on train+val, the full pre-cutoff "
+                     "record, as the paper's final tables do")
 a = ap.parse_args()
 
-corpus = load_corpus(a.data_dir); vocab = corpus["vocab"]; games = corpus["games"]
+corpus = load_corpus(a.data_dir, a.splits); vocab = corpus["vocab"]; games = corpus["games"]
+if a.fit_with_val:
+    _n = sum(1 for g in games.values() if g["split"] == "val")
+    for g in games.values():
+        if g["split"] == "val":
+            g["split"] = "train"
+    print(f"fit-with-val: {_n} val games join train for baseline fits")
 PH, PA = signed_make_points(vocab)
 rate, P = load_card(a.data_dir); meta = load_game_meta(a.data_dir)
 
@@ -82,11 +95,15 @@ if a.ckpt:
     m = tb.BasketballLM(len(vocab), len(ck["pvocab"]), d=d, nlayers=nl, port=port)
     m.load_state_dict(sd, strict=False); m.eval()
     cfg = os.path.join(os.path.dirname(a.ckpt), "config.json")
-    wpool = bool(json.load(open(cfg)).get("mh_wpool", False)) if os.path.exists(cfg) else False
+    _cfg = json.load(open(cfg)) if os.path.exists(cfg) else {}
+    wpool = bool(_cfg.get("mh_wpool", False))
+    # the released model trains its pregame head card-only, so the readout
+    # must zero the same embedding slice or train and eval disagree
+    cardonly = bool(_cfg.get("mh_cardonly", False))
     def lut(pid, gid):
-        s = str(gid)[3:5]
-        r = rlut.get((str(pid), str(gid))) or rlut.get((str(pid), s)) or rlut.get((str(pid), "*")) or ()
-        return (tuple(r) + (0.,) * port)[:port]
+        # per-(player, game) as-of rows only; a missing row feeds zeros
+        # (league mean), never a season or career aggregate
+        return (tuple(rlut.get((str(pid), str(gid))) or ()) + (0.,) * port)[:port]
     lm_pre = {}
     with torch.no_grad():
         for gid, g in games.items():
@@ -94,7 +111,8 @@ if a.ckpt:
             for ros in (g["hro"], g["aro"]):
                 pi = torch.tensor([ck["pvocab"].get(str(p), 0) for p in ros])
                 rt = torch.tensor([lut(p, gid) for p in ros], dtype=torch.float32)
-                f = m.pfuse(torch.cat([m.pemb(pi), torch.full((len(pi), 1), .5), rt], -1))
+                pe = torch.zeros(len(pi), 32) if cardonly else m.pemb(pi)
+                f = m.pfuse(torch.cat([pe, torch.full((len(pi), 1), .5), rt], -1))
                 if wpool:
                     wv = torch.softmax(torch.where(pi > 0, rt[:, 7], torch.full_like(rt[:, 7], -1e9)), 0)
                     gv.append((f * wv.unsqueeze(-1)).sum(0))

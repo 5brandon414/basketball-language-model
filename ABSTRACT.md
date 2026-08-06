@@ -1,90 +1,71 @@
-# Speaking Basketball: A Play-by-Play Grammar and a Generative Model for Unified In-Game Forecasting
+# Speaking Basketball: Generative Play-by-Play for Unified Game Forecasting
 
 ## Introduction
 
-Basketball already writes itself down. Every game leaves a transcript
-of hundreds of ordered events with a grammar of its own. A foul sends a
-shooter to the line by rule; the play after a timeout is anyone's guess.
-Yet prediction research rarely reads it. Pregame models consume season
-aggregates, in-game models reduce the transcript to score and clock,
-and possession simulators are memoryless by construction. Transformers
-read event streams in baseball (SSAC) and soccer, but none reads, or
-writes, a basketball game whole. The Basketball Language Model does
-both. A decoder-only transformer treats each game as a document and
-each event as a token, then writes the rest, event by event. Repeated
-generations form one joint distribution over endings, answering win
-probability, margin, total, rotations, and lineup what-ifs.
+Basketball already writes itself down as an ordered transcript.
+Prediction rarely reads it. Instead, work splits across separate models,
+among them pregame ratings, live win probability and possession
+simulators, and the live model often reads the pregame forecast rather
+than the game itself. Event-stream transformers write soccer and
+baseball, where substitutions are few and permanent, but basketball
+rotations turn over all game, the same players leaving and returning, so
+writing basketball means choosing who is on the floor. We ask whether
+writing the game whole can replace rating it in pieces.
 
 ## Methods
 
-We tokenize play-by-play from 11,896 games across ten seasons (2016-2025)
-into a 60-symbol vocabulary spanning every recorded event type;
-shots are refined by zone, outcome, and assist. A compact decoder-only transformer reads the entire game so far and
-predicts the next event, its elapsed time, and the acting player,
-chosen by pointing at the ten on court. On substitutions, a
-second pointer picks who enters from the bench. Player identity
-enters through learned embeddings plus a "knowledge card" of
-season-to-date statistics computed before each game; new players
-and seasons slot in without retraining. Pregame, before any events
-exist, a head over the pooled rosters gives the point forecast; in-game
-forecasts come from simulation. Rollouts run in parallel from any
-real game state, using only information available at that moment.
+We tokenize 5.79 million events from 11,896 NBA games into a 60-symbol
+vocabulary. A 1.75M-parameter decoder-only transformer (Basketball LM)
+reads an entire game at once and predicts the next event, which of the
+ten players on the floor performs it, and, on substitutions, who checks
+in from the bench. Identity arrives as a fixed learned embedding plus a
+49-dial card of each player's state strictly before that night, rebuilt
+per fold, so form and role stay current while the embedding does not.
+The pregame head reads that card alone with embeddings zeroed, after we
+measured it over-trusting stale embeddings on recent games. In-game
+forecasts come from 24 rollouts. In three walk-forward folds we train
+from scratch on everything before each cutoff and test on the next 180
+games, refitting every baseline per fold.
 
 ## Results
 
-On its native task, next-event prediction, the model leads every
-baseline at every level of predictability, all on the same 500 held-out
-games (Table 1). Across both horizons it matches or beats every margin
-baseline (Table 2). Correlation gains over Elo and halftime-lead are
-statistically significant; winner accuracy and error are ties, and
-gradient-boosted trees tie every pointwise number, so nothing is
-sacrificed for generation. Beyond pointwise models, the rollouts write the full run of play. The
-model drives every substitution itself, never consulting real rotations, and
-per-player minutes and totals (0.707 correlation) fall out of the
-simulation. Calibration holds as sampled. Margin intervals at 50/80/90%
-cover within ±3 percentage points and totals within ±7.
+The model leads every baseline at next-event prediction in all three
+folds, beating gradient-boosted trees by 2.4 accuracy points pooled
+(Table 1). On margin it is level with the strongest baseline (Table 2),
+the pregame correlation gain over Elo being the only significant gap.
+Driving every substitution itself and never consulting real rotations,
+the model still ties the GB trees on sampled halftime margin. Halftime
+intervals cover nominal 50, 80 and 90 percent within five percentage
+points, uncorrected.
 
-Table 1. Next-event prediction, semantic event-class top-1 (16 classes),
-stratified by transition difficulty, a median split on the entropy of the
-next class given the prior event. Constrained transitions are the
-play-by-play grammar's near-forced rules (a miss is followed by a
-rebound); Open transitions are genuine basketball decisions.
-Sixteen-class perplexity is
-4.01 (LM), 4.61 (GB), 5.44 (bigram), 12.71 (historical). Three-bucket and
-per-class results appear in the paper.
+Table 1. Next-event top-1 over 16 classes, pooled across folds
+(n=269,881). Constrained and Open are a median split on next-class
+entropy, separating near-forced transitions, like a rebound after a
+miss, from genuine decisions.
 
 | Model (context used) | All | Constrained | Open |
 |---|---|---|---|
-| Historical average (none) | 14.2% | 24.0% | 2.5% |
-| Bigram (last event) | 37.6% | 48.8% | 24.4% |
-| GB trees (recent events + state) | 42.7% | 53.1% | 30.2% |
-| Basketball LM (entire game) | 45.3% | 55.3% | 33.3% |
+| Bigram (last event) | 37.8% | 49.3% | 24.1% |
+| GB trees (recent events + state) | 42.6% | 53.2% | 29.9% |
+| Basketball LM (entire game) | 45.0% | 55.3% | 32.8% |
 
-Table 2. Standard baseline = point-spread Elo with margin-of-victory
-updates (K=20, home edge 100, 25% season regression) for pregame rows; a
-train-fit regression of final margin on halftime lead for halftime rows.
-Gradient-boosted trees receive the same roster inputs as the model.
-Correlation gains over the standard baselines are significant (paired 95%
-CI excludes zero); all other gaps are not.
+Table 2. Margins, fold-averaged over 540 test games. Standard is
+point-spread Elo before the game and a halftime-lead regression at
+halftime.
 
-| Metric (500 games) | Standard baseline | GB trees | Basketball LM |
+| Metric | Standard (Elo) | GB trees (same roster inputs) | Basketball LM |
 |---|---|---|---|
-| Pregame margin corr | 0.414 | 0.460 | 0.509 |
-| Pregame winner accuracy | 64.8% | 65.4% | 65.0% |
-| Pregame margin MAE | 10.82 | 10.63 | 10.54 |
-| Halftime margin corr | 0.648 | 0.684 | 0.690 |
-| Halftime winner accuracy | 73.6% | 75.4% | 74.6% |
-| Halftime margin MAE | 9.21 | 8.98 | 8.84 |
+| Pregame margin corr | 0.382 | 0.426 | 0.426 |
+| Pregame winner accuracy | 62.0% | 63.5% | 63.0% |
+| Pregame margin MAE | 10.83 | 10.55 | 10.58 |
+| Halftime margin corr | 0.639 | 0.672 | 0.660 |
+| Halftime winner accuracy | 70.7% | 71.5% | 72.2% |
+| Halftime margin MAE | 9.07 | 8.78 | 8.88 |
 
 ## Conclusion
 
-One model does what the separate models did. It predicts the next
-event better than every baseline, and because it can simulate the rest of
-the game from any point, it also gives calibrated forecasts the others
-cannot. Margin, minutes, win probability, and lineup what-ifs all come
-from the same simulations, so they never contradict each other. A
-gradient-boosted tree can match its point predictions, but cannot produce
-a game. The approach needs nothing but play-by-play, so it works for any
-sport that keeps one. An announcer calls the game once. The model calls it
-over and over, and reads the forecast off the endings.
-Model and code are openly released.
+One model does all three jobs, level with the specialists on margin and
+ahead event by event. Margin, total points, win probability and roster
+what-ifs come from one set of rollouts, so the coach weighing foul
+trouble and the front office weighing an injury cannot get contradictory
+answers. We release code and data.
