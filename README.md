@@ -1,17 +1,29 @@
 # Basketball Language Model
 
-A game is a document; an event is a token. A small decoder-only transformer
-(~1.75M params, d=160 x 5) reads an NBA game as a sequence of 60 event
-tokens conditioned on the ten players on the floor and predicts the next
-event, its clock burn, the actor, the assister, and — on substitutions —
-who checks in. Simulation = sampling the rest of the document many times
-and reading score distributions off the rollouts.
+A game is a document; an event is a token. A small decoder-only
+transformer reads an NBA game as a sequence of event tokens conditioned
+on the ten players on the floor and predicts the next event, its clock
+burn, the actor, the assister, and — on substitutions — who checks in.
+Simulation is sampling the rest of the document many times and reading
+score distributions off the rollouts.
 
-## Dataset
-Code consumes the companion Hugging Face dataset (link added on
-publication; pin a dataset revision when citing): 11,896 games / 5.79M events, 2016-17..2025-26,
-built from public NBA.com endpoints. See DATA.md for the complete token
-grammar and schemas. Point every script at it with `--data-dir`.
+The submission itself, including the result tables, is ABSTRACT.md.
+
+## Data
+The play-by-play comes from public NBA.com endpoints and is **not
+redistributed here**. DATA.md is the build specification — the token
+grammar and the schema of every file the code expects — so the corpus can
+be rebuilt from those endpoints. Point the scripts at your build with
+`--data-dir`.
+
+The evaluation splits **are** published, and they are the part that
+matters for comparability: `data/fold{1,2,3}_splits.json` and
+`data/fold{1,2,3}_test_gids.txt` are game-id lists, so a corpus rebuilt
+independently can be trained and scored on exactly the games behind every
+number in the paper.
+
+Trained weights are not published with this repository; they come in a
+later phase of the work.
 
 ## Setup
 python >= 3.9; `pip install -r requirements.txt`.
@@ -21,11 +33,10 @@ The paper evaluates strictly forward in time. Three walk-forward folds cut
 at 2024-12-15, 2025-03-01 and 2025-12-15; each fold trains a model from
 scratch on every game before its cutoff (the last 400 held out for early
 stopping) and tests on the 180 games that follow. Every baseline is refit
-per fold on the same pre-cutoff record. `data/fold{1,2,3}_splits.json`
-carry the assignment (games after a cutoff that are not that fold's test
-games are labelled `exclude` and never trained on) and
-`data/fold{1,2,3}_test_gids.txt` list the test games. Reported numbers
-average the three folds. The released checkpoint is fold 3.
+per fold on the same pre-cutoff record. In
+`data/fold{1,2,3}_splits.json`, games after a cutoff that are not that
+fold's test games are labelled `exclude` and never trained on. Reported
+numbers average the three folds.
 
 ## Reproduce (seeds pinned; fold 3 shown, repeat with 1 and 2)
 ```
@@ -40,40 +51,39 @@ python3 generate_bball_lm.py --rollouts 24 --games 180 --split all \
 python3 experiments/table1_nextevent.py --data-dir <dataset> \
     --splits data/fold3_splits.json --fit-with-val --ckpt ckpt/best_model.pt
 python3 experiments/table2_margins.py --data-dir <dataset> \
-    --splits data/fold3_splits.json --fit-with-val --ckpt ckpt/best_model.pt \
-    --lm-half-preds <dataset>/lm_half_preds.parquet
-# optional variance-shrink tooling (paper coverage is raw); needs pregame
-# rollouts first (--state pre):
-python3 d_lite_calibrate.py ckpt/
+    --splits data/fold3_splits.json --card player_card_fold3.parquet \
+    --fit-with-val --ckpt ckpt/best_model.pt --lm-half-preds <half_preds>.parquet
 ```
-These commands reproduce one fold. The paper's tables average the three,
-and its significance tests resample folds jointly, so a single fold's
-printed confidence interval is narrower in scope than the paper's. Run
-all three folds and average to match the reported numbers.
-`--fit-with-val` is the paper's fairness rule, giving every baseline the
-full pre-cutoff record. `--lm-half-preds` supplies the halftime rollout
-predictions shipped with the dataset, produced by the generate command
-above from the fold 3 checkpoint.
 
-`--mh-cardonly` is part of the paper's recipe, not an option: it makes the
+Two flags are part of the recipe, not options. `--mh-cardonly` makes the
 pregame margin and win-probability heads read the knowledge card alone,
 with player embeddings zeroed, so pregame forecasts carry no learned
-player identity. Omitting it trains a different model.
+player identity. `--fit-with-val` gives every baseline the full
+pre-cutoff record. Omitting either runs a different experiment.
 
-## Expected metrics (three folds, 540 test games, fold-averaged)
-| Metric | Standard baseline | GB trees | Basketball LM |
-|---|---|---|---|
-| Next-event class top-1 (pooled) | 37.8% (bigram) | 42.6% | 45.0% |
-| Pregame margin corr / acc / MAE | 0.382 / 62.0% / 10.83 | 0.426 / 63.5% / 10.55 | 0.426 / 63.0% / 10.58 |
-| Halftime margin corr / acc / MAE | 0.639 / 70.7% / 9.07 | 0.672 / 71.5% / 8.78 | 0.661 / 72.2% / 8.88 |
-| Game totals corr (halftime) | — | — | 0.721 |
-| Halftime coverage at 50/80/90 (raw) | — | — | 47.0 / 75.4 / 86.3 |
+The generate step writes `gen_all_half_lmsubs.csv` beside the checkpoint.
+`--lm-half-preds` reads a parquet with columns `pred` and `actual`
+(optionally `pred_total`, `actual_total`) and scores its rows as they
+stand, so convert that CSV first: `pm` and `am` are the predicted and
+actual margins, `pt` and `at` the totals.
 
-Pregame LM figures come from the card-only roster head; halftime figures
-use raw sampling with the model driving its own substitutions
-(`--lm-subs`), no steering, and the real second-half rotations are never
-consulted. The model's information is the public pregame state (available
-roster, starters, strictly-before statistics) plus, at halftime, the
-observed first half.
+## Reading the output
+Each run reports one fold. The paper averages three, and its significance
+tests resample folds jointly, so a single fold's printed confidence
+interval is narrower in scope than the paper's, and a single fold will not
+reproduce the fold-averaged tables in ABSTRACT.md exactly. Run all three
+folds and average to compare.
 
-MIT licensed. File-by-file provenance in MANIFEST.md.
+The LM pregame column is the card-only head, not a rollout. The LM
+halftime column is raw sampling with the model driving its own
+substitutions (`--lm-subs`), no steering, and the real second-half
+rotations are never consulted. The model's information is the public
+pregame state (available roster, starters, strictly-before statistics)
+plus, at halftime, the observed first half.
+
+Halftime interval coverage at the nominal 50, 80 and 90 percent levels is
+47.0 / 75.4 / 86.3 percent, uncorrected. The generate step writes each
+game's per-rollout margins, so that is checkable directly rather than
+through a normal approximation.
+
+MIT licensed. File inventory in MANIFEST.md.

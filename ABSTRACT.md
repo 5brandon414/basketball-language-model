@@ -14,25 +14,26 @@ writing the game whole can replace rating it in pieces.
 
 ## Methods
 
-We tokenize 5.79 million events from 11,896 NBA games into a 60-symbol
-vocabulary. A 1.75M-parameter decoder-only transformer (Basketball LM)
-reads an entire game at once and predicts the next event, which of the
-ten players on the floor performs it, and, on substitutions, who checks
-in from the bench. Identity arrives as a fixed learned embedding plus a
-49-dial card of each player's state strictly before that night, rebuilt
-per fold, so form and role stay current while the embedding does not.
-The pregame head reads that card alone with embeddings zeroed, after we
-measured it over-trusting stale embeddings on recent games. In-game
-forecasts come from 24 rollouts. In three walk-forward folds we train
-from scratch on everything before each cutoff and test on the next 180
-games, refitting every baseline per fold.
+We tokenize 5.79 million public NBA.com play-by-play events from 11,896
+games into a 60-symbol vocabulary. A 1.75M-parameter decoder-only
+transformer (Basketball LM) reads an entire game at once and predicts
+the next event, which of the ten players on the floor performs it, and,
+on substitutions, who checks in from the bench. Identity arrives as a
+fixed learned embedding plus a 49-dial card of each player's state
+strictly before that night, rebuilt per fold, so form and role stay
+current while the embedding does not.
+The pregame head reads that card alone over the dressed roster and
+starters, embeddings zeroed, after we measured it over-trusting stale
+embeddings. In-game forecasts come from 24 rollouts. In three
+walk-forward folds we train from scratch on everything before each cutoff
+and test on the next 180 games, refitting every baseline per fold.
 
 ## Results
 
 The model leads every baseline at next-event prediction in all three
 folds, beating gradient-boosted trees by 2.4 accuracy points pooled
 (Table 1). On margin it is level with the strongest baseline (Table 2),
-the pregame correlation gain over Elo being the only significant gap.
+only the pregame correlation gain over Elo clearing a paired bootstrap.
 Driving every substitution itself and never consulting real rotations,
 the model still ties the GB trees on sampled halftime margin. Halftime
 intervals cover nominal 50, 80 and 90 percent within five percentage
@@ -64,8 +65,7 @@ halftime.
 
 ## Conclusion
 
-One model does all three jobs, level with the specialists on margin and
-ahead event by event. Margin, total points, win probability and roster
-what-ifs come from one set of rollouts, so the coach weighing foul
-trouble and the front office weighing an injury cannot get contradictory
-answers. We release code and data.
+Because it writes the game rather than rating it, one run answers what
+happens if a starter sits, and gives margin, total and win probability
+that agree. It needs only play-by-play, so any league that logs events
+can run the same recipe, and we release the code.

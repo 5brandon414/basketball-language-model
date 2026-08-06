@@ -1,61 +1,65 @@
-# experiments/ — baseline comparisons (paper Tables 1–2)
+# experiments/ — baseline comparisons (paper Tables 1-2)
 
-Reproduces the model-vs-baseline comparisons in the paper, entirely from
-the public dataset. All scripts read data through `loader.load_corpus`
-plus the shipped sidecars (`player_card.parquet`, `game_meta.parquet`,
-`vocab.json`, `splits.json`) — no database, no external services.
+Both scripts read a corpus you built (see ../DATA.md) through
+`loader.load_corpus`, with the fold assignment supplied by `--splits`.
+`table2_margins.py` also reads `game_meta.parquet` (for Elo) and
+the player card named by `--card` (for the trees) from the same directory. Requires
+scikit-learn.
 
 ## Scripts
 
-| script | paper table | baselines (computed fresh) | LM column |
+| script | paper table | baselines (refit here) | LM column |
 |---|---|---|---|
-| `table1_nextevent.py` | Table 1 (next-event) | historical-average (unigram), bigram, gradient-boosted trees | forward pass from `--ckpt` |
+| `table1_nextevent.py` | Table 1 (next-event) | historical average (unigram), bigram, gradient-boosted trees | forward pass from `--ckpt` |
 | `table2_margins.py` | Table 2 (margins) + totals | point-spread Elo, halftime-lead regression, gradient-boosted trees | pregame from `--ckpt`; halftime from `--lm-half-preds` |
-| `_common.py` | — | shared loaders, class map, significance tests | — |
+| `_common.py` | — | shared loaders, class map, bootstrap | — |
 
 ## Run
 
-Baselines only (no model needed — reproduces every baseline column):
+From the repo root, one fold at a time; pass the fold whose checkpoint you
+are scoring. `--fit-with-val` is the paper's fairness rule, giving every
+baseline the full pre-cutoff record.
+
+Baselines only (no checkpoint needed):
 
 ```
-python3 experiments/table2_margins.py  --data-dir ../sloan_hf_dataset
-python3 experiments/table1_nextevent.py --data-dir ../sloan_hf_dataset
+python3 experiments/table1_nextevent.py --data-dir <dataset> \
+    --splits data/fold3_splits.json --fit-with-val
+python3 experiments/table2_margins.py  --data-dir <dataset> \
+    --splits data/fold3_splits.json --card player_card_fold3.parquet --fit-with-val
 ```
 
-With the LM column, first train a checkpoint from the released data using
-the full paper recipe (see the top-level README for the exact command —
-the bare defaults train a smaller-headed model), then pass it:
+Add the LM column with `--ckpt ckpt/best_model.pt`. Train that checkpoint
+with the full recipe in ../README.md; the bare defaults train a different
+model.
 
-```
-python3 experiments/table1_nextevent.py --data-dir ../sloan_hf_dataset --ckpt ckpt/best_model.pt
-python3 experiments/table2_margins.py  --data-dir ../sloan_hf_dataset --ckpt ckpt/best_model.pt
-```
+The halftime-LM row of Table 2 comes from rollouts rather than `--ckpt`:
+run `generate_bball_lm.py --state half --lm-subs`, convert the CSV it
+writes beside the checkpoint as ../README.md describes, and pass the
+result as `--lm-half-preds`.
 
-The halftime-LM row of Table 2 needs a rollout run; produce predictions
-with `generate_bball_lm.py --state half --lm-subs --kv` (the model drives
-its own second-half rotations; `--kv` is an exact-math cache, ~10x
-faster), then rename columns to `game_id,pred,actual` (optionally
-`pred_total,actual_total`) and pass `--lm-half-preds`.
+## Output
 
-## Metrics
+- **Table 2**: correlation, winner accuracy and MAE over the fold's test
+  games (n is printed per row). With `--ckpt`, the pregame LM line is
+  followed by paired-bootstrap 95% CIs on its correlation difference
+  against Elo and against the trees.
+- **Table 1**: top-1 accuracy over the 16 semantic event classes, overall
+  and stratified by transition difficulty — the entropy of
+  P(class | prior event), which separates near-forced transitions (rebound
+  after a miss) from genuine decisions — as a median split and as terciles.
+- **Totals**: winner accuracy is meaningless (a total's sign is always
+  positive); read correlation and MAE.
 
-- **Table 2** margins/totals: correlation, winner accuracy, MAE on the
-  frozen `test` split. Correlation-difference significance via a paired
-  bootstrap 95% CI (`_common.boot_corr_diff`).
-- **Table 1** next-event: scored at the 16 semantic event classes
-  (top-1), overall and stratified by transition difficulty — the entropy
-  of P(class | prior event), which separates near-forced transitions
-  (rebound after a miss) from genuine decisions. Perplexity reported at
-  the 16-class level.
+Each run reports one fold. The paper averages three and resamples them
+jointly, so a single fold's printed interval is narrower in scope than the
+published one.
 
-## Notes / caveats
+## Notes
 
-- **Elo** uses `game_meta.parquet` (game_id, team abbreviations, date) —
-  shipped alongside the dataset; team/date are public.
-- **Halftime LM is raw sampling** — the paper's numbers come from plain
-  rollouts of this model with no steering, re-weighting, or post-hoc
-  correction anywhere in the pipeline; the reported calibration coverage
-  is the raw sampling distribution's.
-- Totals report a trivial 100% "accuracy" (a total's sign is always
-  positive); read correlation and MAE for totals.
-- Requires `scikit-learn` (in `requirements.txt`).
+- The pregame LM column is the card-only head, not a rollout. If the
+  checkpoint's `config.json` records `mh_cardonly`, `table2_margins.py`
+  zeroes the same embedding slice the model was trained with, so training
+  and evaluation agree.
+- The halftime LM column is raw rollout output; nothing in these scripts
+  re-weights or corrects it.

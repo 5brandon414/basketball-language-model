@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-"""Paper Table 2 — next-event prediction: LM vs historical/bigram/GB.
+"""Paper Table 1 — next-event prediction: LM vs historical average, bigram, GB trees.
 
-  python3 experiments/table1_nextevent.py --data-dir <dataset> --ckpt <best_model.pt>
+  python3 experiments/table1_nextevent.py --data-dir <dataset> --splits data/fold3_splits.json --fit-with-val --ckpt ckpt/best_model.pt
 """
 import argparse
 import numpy as np
 import torch
 from sklearn.ensemble import HistGradientBoostingClassifier
-from _common import (load_corpus, class_map, to_class_dist, load_card,
-                     boot_corr_diff)
+from _common import load_corpus, class_map, to_class_dist
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--data-dir", default="../sloan_hf_dataset")
 ap.add_argument("--splits", default=None,
-                help="split JSON overriding splits.json; use the fold "
-                     "file matching the checkpoint (fold3_splits.json "
-                     "for the released model)")
+                help="fold split JSON, e.g. data/fold3_splits.json; must "
+                     "match the fold the checkpoint was trained on. Default "
+                     "is the dataset's own splits.json")
 ap.add_argument("--ckpt", default=None, help="trained checkpoint; omit to run baselines only")
-ap.add_argument("--gb-sample", type=int, default=900000)
+ap.add_argument("--gb-sample", type=int, default=900000,
+                help="cap on GB training rows; above it, a random subsample is taken")
 ap.add_argument("--fit-with-val", action="store_true",
                 help="fit every baseline on train+val, the full pre-cutoff "
-                     "record, as the paper's final tables do")
+                     "record, as the paper does")
 a = ap.parse_args()
 
 corpus = load_corpus(a.data_dir, a.splits); vocab = corpus["vocab"]; V = len(vocab)
@@ -55,7 +55,7 @@ for g in tr:
         if i: bigc[t[i-1], tok2cls[t[i]]] += 1
 uni_cd = to_class_dist(uni / uni.sum(), tok2cls, NC)
 bigc = bigc / bigc.sum(1, keepdims=True)
-Hbits = -(bigc * np.log2(bigc)).sum(1)      # forced-ness of transitions out of each prior event
+Hbits = -(bigc * np.log2(bigc)).sum(1)
 
 # ---- GB context classifier ----
 Xtr, Ytr = [], []

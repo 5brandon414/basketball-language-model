@@ -3,7 +3,6 @@
 import os, sys
 import numpy as np
 import pandas as pd
-from math import erf, comb
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REL = os.path.dirname(HERE)                 # sloan_release/
@@ -39,10 +38,10 @@ def to_class_dist(p, tok2cls, NC):
     o = np.zeros(NC); np.add.at(o, tok2cls, p); return o
 
 
-def load_card(data_dir):
-    """15-dial as-of player card, per-(pid,game) rows only; a miss returns
-    zeros (the z-scored league mean). Returns rate(pid, gid) -> np.array(15)."""
-    pc = pd.read_parquet(os.path.join(data_dir, "player_card.parquet"))
+def load_card(data_dir, card="player_card.parquet"):
+    """As-of player card, per-(pid,game) rows only; a miss returns zeros (the
+    z-scored league mean). Returns (rate(pid, gid) -> dials, n_dials)."""
+    pc = pd.read_parquet(os.path.join(data_dir, card))
     dcols = [c for c in pc.columns if c.startswith("card_")]
     lut = {(str(r.player_id), str(r.key)): np.array([getattr(r, c) for c in dcols])
            for r in pc.itertuples(index=False)}
@@ -58,23 +57,12 @@ def load_game_meta(data_dir):
 
 
 # ---- significance ----
-def p_from_z(z):
-    return 2 * (1 - 0.5 * (1 + erf(abs(z) / 2 ** 0.5)))
-
 def boot_corr_diff(a, b, y, n=4000, seed=0):
+    """Paired bootstrap over games on corr(a,y) - corr(b,y).
+    Returns (mean diff, 2.5%, 97.5%, whether the CI excludes zero)."""
     rng = np.random.default_rng(seed); N = len(y); d = []
     for _ in range(n):
         i = rng.integers(0, N, N)
         d.append(np.corrcoef(a[i], y[i])[0, 1] - np.corrcoef(b[i], y[i])[0, 1])
     lo, hi = np.percentile(d, [2.5, 97.5])
     return float(np.mean(d)), float(lo), float(hi), bool(lo > 0 or hi < 0)
-
-def sign_test_closer(a, b, y):
-    closer = (np.abs(a - y) < np.abs(b - y)).mean()
-    return float(closer), p_from_z((closer - 0.5) / np.sqrt(0.25 / len(y)))
-
-def mcnemar_p(a_ok, b_ok):
-    b = int((a_ok & ~b_ok).sum()); c = int((~a_ok & b_ok).sum()); nn = b + c
-    if nn == 0: return 1.0
-    k = min(b, c)
-    return min(1.0, sum(comb(nn, i) for i in range(k + 1)) / 2 ** nn * 2)

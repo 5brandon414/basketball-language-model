@@ -1,14 +1,21 @@
-# DATA.md — corpus specification
+# DATA.md — corpus build specification
 
-## Provenance
-All data derives from public NBA.com endpoints (play-by-play and box-score
-APIs), regular seasons 2016-17 through 2025-26: 11,896 games, 5,793,945
-event tokens. Extraction was validation-gated: reconstructed final scores
-from the token stream must match official box-score finals (99.6% exact;
-known edge cases documented). No proprietary feeds.
+The play-by-play is not redistributed here. This file specifies the corpus
+the code expects, so it can be rebuilt from the public NBA.com play-by-play
+and box-score endpoints; point every script at your build with `--data-dir`.
 
-## Token grammar (60-token vocabulary; vocab.json is authoritative)
-Structural: `PAD`, `BOS`, `EOS`, `PERIOD`.
+Scope: regular-season games of the 2016-17 through 2025-26 seasons. The
+exact game ids are the keys of `data/fold{1,2,3}_splits.json`.
+
+## Token grammar (60 tokens)
+
+`vocab.json` is authoritative: a JSON array of the 60 token strings, where a
+token's id is its index in the array.
+
+Structural: `BOS` (row 0 of every game), `EOS` (last row), `PERIOD` (one row
+at the start and one at the end of each period, so eight in a regulation
+game), `PAD` (never appears in the data; id 0, used to pad batches).
+
 Per side S in {H (home), A (away)}:
 - Shots, by class x outcome: `S_<CLASS>_MISS`, `S_<CLASS>_MAKE`,
   `S_<CLASS>_MAKE_AST` (assisted make), for CLASS in:
@@ -17,63 +24,83 @@ Per side S in {H (home), A (away)}:
 - Free throws: `S_FT_MAKE`, `S_FT_MISS`.
 - Rebounds: `S_OREB`, `S_DREB`.
 - `S_TOV`, `S_STEAL`, `S_BLOCK`, `S_FOUL`, `S_TIMEOUT`.
-- `S_SUB` — one token per outgoing player at a lineup change.
+- `S_SUB` — one row per outgoing player at a lineup change.
 
-## Per-event fields (events_XX.parquet)
+Scores are derived from token strings alone (`3PT*_MAKE` = 3, `FT_MAKE` = 1,
+any other `MAKE` = 2), so the stream must reproduce official final scores by
+itself.
+
+## `events_*.parquet` — the event stream
+
+Any number of shards, globbed as `events_*.parquet`; all rows of one game
+must sit in one shard (the loader groups per file and later files win).
+
 | column | meaning |
 |---|---|
 | game_id | 10-char NBA game id |
-| idx | event index within game (0-based, includes BOS row) |
+| idx | event index within the game, 0-based, BOS row included |
 | token | vocabulary string (above) |
-| dt | seconds to the next event (float; last event 0) |
-| clock | elapsed game time / 2880 (OT clipped at 3600s) |
-| sdiff | running score diff (home-away)/20, clipped to [-2, 2] |
-| actor | on-court slot of the acting player: 0-4 home, 5-9 away, -100 n/a |
-| entrant | roster index (0-16, into the sorted available roster) of the incoming player on SUB rows, -100 n/a |
-| assister | on-court slot of the assisting teammate on _MAKE_AST rows, -100 n/a |
+| clock | elapsed game time / 2880 (OT capped at 3600s, so clock <= 1.25) |
+| sdiff | running score diff (home-away) / 20, clipped to [-2, 2] |
+| actor | on-court slot of the acting player: 0-4 home, 5-9 away; -100 if none |
+| entrant | on `S_SUB` rows, the roster index of the incoming player; -100 elsewhere |
+| assister | on `S_<CLASS>_MAKE_AST` rows, the on-court slot of the assister; -100 elsewhere, and on assisted makes whose assister does not resolve to a slot |
 
-## Model clock bins (dt discretization used in training)
-Bin edges (seconds): [1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 17, 20, 24, 28, 33];
-de-binned at generation with empirical per-bin medians fit on train.
+## `lineups.parquet` — stint timeline
 
-## Information contract (what the model may know)
-Pregame the model knows (1) the set of players AVAILABLE to play (the
-dressed active list, fixed before tip), (2) the starters, and (3) player
-statistics computed strictly before that game. It never observes who
-actually enters off the bench or anyone's minutes — those are generated.
-The available roster is outcome-independent (its size is uncorrelated with
-the final margin, r = -0.01, versus r = 0.58 for the appeared roster).
+`game_id`, `t_start_sec`, `duration_sec`, `home_lineup`, `away_lineup`
+(five player-id strings each), `home_pts`, `away_pts` (points each side
+scored during the stint; `generate_bball_lm.py` sums them for the game's
+actual final score). Stints must be ordered and contiguous, each starting
+where the previous ended: `loader.py` reads every event's five and every
+player's cumulative minutes off this timeline.
 
-## Conditioning fields (reconstructed by loader.py)
-Per token: the ten on-court player ids (5 home + 5 away, from
-lineups.parquet by elapsed time), each player's cumulative minutes so far,
-the available roster per side (up to 17 ids, sorted; from rosters.parquet),
-roster cumulative minutes, and the score/clock scalars above.
+## `rosters.parquet` — pregame available lists
 
-## Other files
-- `lineups.parquet`: game_id, t_start_sec, duration_sec, home_lineup,
-  away_lineup (arrays of player-id strings) — lineup-stint timeline.
-- `rosters.parquet`: game_id, home_available, away_available — the pregame
-  active (dressed) lists: everyone who played plus everyone in uniform who
-  did not, excluding inactive/did-not-dress/not-with-team designations.
-  Reconstructed per game from the league's own inactive and did-not-play
-  designations; a game whose box record is empty is never silently reduced
-  to the players who appeared, because that list depends on the outcome.
-- `player_card_fold{1,2,3}.parquet`: the knowledge card, per (player_id,
-  game_id) rows only; 49 z-scored dials covering scoring, playmaking,
-  rebounding, shooting, size, minutes, experience, recent form,
-  availability, defense, ball security and impact, plus shot diet,
-  assisted share, foul and free-throw rates, substitution habits, age,
-  prior-season play-type shares and rim protection. Each dial is the
-  player's state strictly before that game night, and each fold's file is
-  built and z-scored on that fold's pre-cutoff games alone, so a card for
-  a test game never reflects the fold's test era. A missing row means no
-  prior NBA appearances; consumers use zeros (the z-scored league mean).
-- `player_card.parquet`: the 15-dial card of the earlier single-split
-  release, kept for compatibility; no paper number uses it.
-- `players.csv`: player_id -> display name.
-- `splits.json`: the earlier single-split assignment (train / val / test /
-  ttest). The paper's numbers come from the walk-forward fold files in the
-  code repository's `data/` directory; pass one with `--splits`.
+`game_id`, `home_available`, `away_available`: the dressed active list per
+side, everyone in uniform, excluding inactive / did-not-dress /
+not-with-team designations. It must not be the list of players who
+appeared — that set depends on the outcome. This is the whole pregame
+roster contract: the model may know who is available and who starts, never
+who actually enters or for how long.
 
-License: MIT (code); data derives from publicly available NBA.com endpoints.
+`loader.py` sorts each list as strings and keeps the first 17; the
+`entrant` column of `events_*.parquet` indexes into that sorted, truncated
+list.
+
+## `player_card_fold{1,2,3}.parquet`, `player_card.parquet` — knowledge card
+
+Columns `player_id`, `key` (the game id the row is as-of), and `card_0` …
+`card_{N-1}`: one row per (player, game) holding that player's z-scored
+state strictly before that game. Each fold's file is built and normalized
+on that fold's pre-cutoff games alone, so a card for a test game never
+reflects the fold's test era. A missing (player, game) row feeds zeros, the
+z-scored league mean.
+
+N is read from the file, so any width works; `card_7` must be a
+recent-minutes dial, because `--mh-wpool` and the trees baseline pool a
+roster by softmax over it.
+
+`--card` selects the training file (the paper uses
+`player_card_fold{k}.parquet`, 49 dials). `experiments/_common.py` always
+reads `player_card.parquet` (15 dials) for its trees baseline.
+
+## `game_meta.parquet`
+
+`game_id`, `home_team`, `away_team` (three-letter abbreviations),
+`game_date` (`YYYY-MM-DD`). Used by the Elo baseline in
+`experiments/table2_margins.py`.
+
+## `players.csv`
+
+`player_id`, `player_name`. Display only, for `print_bball_game.py`.
+
+## `splits.json`
+
+game_id -> split label. Games with no entry are skipped by the loader.
+`<data-dir>/splits.json` is the default assignment; `--splits` overrides it
+with the walk-forward fold files shipped in `data/`, which label every game
+`train`, `val`, `test`, or `exclude`.
+
+License: MIT (code); the data derives from publicly available NBA.com
+endpoints and is not redistributed here.

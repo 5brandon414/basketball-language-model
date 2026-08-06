@@ -3,17 +3,15 @@
 
   python3 print_bball_game.py --data-dir <dataset> [--gid <game_id>] [--split test]
 """
-import argparse, sys
+import argparse
 from loader import load_corpus
 import numpy as np
-
-sys.path.insert(0, ".")
-DATA = "data"
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--gid", default=None, help="game_id (default: first test game)")
+    ap.add_argument("--gid", default=None,
+                    help="game_id (default: first game in --split)")
     ap.add_argument("--data-dir", default="../sloan_hf_dataset")
     ap.add_argument("--split", default="test")
     ap.add_argument("--n", type=int, default=0, help="max events (0 = all)")

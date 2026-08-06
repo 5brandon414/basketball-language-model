@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Paper Table 1 — margin prediction: LM vs Elo, halftime-lead, and GB.
+"""Paper Table 2 — margin and total prediction: LM vs Elo, halftime-lead, GB trees.
 
-  python3 experiments/table2_margins.py --data-dir <dataset> --ckpt <best_model.pt>
+  python3 experiments/table2_margins.py --data-dir <dataset> --splits data/fold3_splits.json --fit-with-val --ckpt ckpt/best_model.pt
 """
 import argparse, json, os
 import numpy as np
@@ -14,14 +14,21 @@ from _common import (load_corpus, signed_make_points, load_card, load_game_meta,
 ap = argparse.ArgumentParser()
 ap.add_argument("--data-dir", default="../sloan_hf_dataset")
 ap.add_argument("--splits", default=None,
-                help="split JSON overriding splits.json; use the fold "
-                     "file matching the checkpoint (fold3_splits.json "
-                     "for the released model)")
+                help="fold split JSON, e.g. data/fold3_splits.json; must "
+                     "match the fold the checkpoint was trained on. Default "
+                     "is the dataset's own splits.json")
 ap.add_argument("--ckpt", default=None, help="checkpoint for the LM pregame column")
-ap.add_argument("--lm-half-preds", default=None, help="parquet(game_id,pred,actual) from generate --state half")
+ap.add_argument("--lm-half-preds", default=None,
+                help="parquet of halftime rollout predictions with columns "
+                     "pred, actual (optionally pred_total, actual_total); "
+                     "see experiments/README.md for how to build it")
+ap.add_argument("--card", default="player_card.parquet",
+                help="player card the trees baseline pools; use the fold card "
+                     "matching --splits so the baseline sees the same as-of "
+                     "normalization the model trained on")
 ap.add_argument("--fit-with-val", action="store_true",
                 help="fit every baseline on train+val, the full pre-cutoff "
-                     "record, as the paper's final tables do")
+                     "record, as the paper does")
 a = ap.parse_args()
 
 corpus = load_corpus(a.data_dir, a.splits); vocab = corpus["vocab"]; games = corpus["games"]
@@ -32,7 +39,7 @@ if a.fit_with_val:
             g["split"] = "train"
     print(f"fit-with-val: {_n} val games join train for baseline fits")
 PH, PA = signed_make_points(vocab)
-rate, P = load_card(a.data_dir); meta = load_game_meta(a.data_dir)
+rate, P = load_card(a.data_dir, a.card); meta = load_game_meta(a.data_dir)
 
 # ---- per-game finals / halftime state ----
 rows = []
@@ -97,8 +104,8 @@ if a.ckpt:
     cfg = os.path.join(os.path.dirname(a.ckpt), "config.json")
     _cfg = json.load(open(cfg)) if os.path.exists(cfg) else {}
     wpool = bool(_cfg.get("mh_wpool", False))
-    # the released model trains its pregame head card-only, so the readout
-    # must zero the same embedding slice or train and eval disagree
+    # --mh-cardonly trains the pregame head with player embeddings zeroed,
+    # so the readout must zero them too or train and eval disagree
     cardonly = bool(_cfg.get("mh_cardonly", False))
     def lut(pid, gid):
         # per-(player, game) as-of rows only; a missing row feeds zeros
@@ -118,7 +125,7 @@ if a.ckpt:
                     gv.append((f * wv.unsqueeze(-1)).sum(0))
                 else:
                     mk = (pi > 0).float().unsqueeze(-1); gv.append((f * mk).sum(0) / mk.sum().clamp(min=1))
-            lm_pre[gid] = float(m.mh(gv[0] - gv[1])) * 20
+            lm_pre[gid] = float(m.mh(gv[0] - gv[1])) * 20   # head regresses margin/20
     df["lm_pre"] = df.gid.map(lm_pre)
 
 # ---- report (frozen test) ----

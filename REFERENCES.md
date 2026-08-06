@@ -13,17 +13,15 @@
    player-conditioned, counterfactual swaps. https://arxiv.org/abs/2512.17266
 4. "Transformer-Based Baseball Modeling for Pitch Outcome Prediction and
    Strategy Optimization" (SSAC). Source of the next-event evaluation
-   format adopted here; scope difference is the contribution: single
-   pitch outcome vs full-game generative simulation.
+   format adopted here.
    https://www.sloansportsconference.com/research-papers/transformer-based-baseball-modeling-for-pitch-outcome-prediction-and-strategy-optimization
 
 ## Simulation and win-probability ancestors (positioned against)
 
 5. Oh, Keshri, Iyengar (SSAC 2015). "Graphical Model for Basketball
-   Match Simulation." The closest ancestor at this conference: full-game
-   NBA simulation via a handcrafted probabilistic graphical model —
-   possession-aggregate and handcrafted structure vs learned event-level
-   generation with identity, rotations, and calibration.
+   Match Simulation." Full-game NBA simulation from a handcrafted
+   possession-aggregate graphical model; the closest ancestor of the
+   learned event-level generation here.
    https://www.sloansportsconference.com/research-papers/graphical-model-for-baskeball-match-simulation
 6. Vracar, Strumbelj, Kononenko (2016). "Modeling basketball play-by-play
    data" (possession-level Markov simulation). Expert Systems with
@@ -51,6 +49,5 @@
     (SSAC 2025). A full game simulator as a Sloan finalist.
     https://www.sloansportsconference.com/research-papers/coachai-badminton-environment-realistic-badminton-game-simulator-for-enhancing-player-performance
 12. "(batter|pitcher)2vec: Statistic-Free Talent Modeling With Neural
-    Player Embeddings" (SSAC 2018). Player embeddings at Sloan; won the
-    2018 RPC.
+    Player Embeddings" (SSAC 2018). Learned player embeddings at Sloan.
     https://www.sloansportsconference.com/research-papers/batter-pitcher-2vec-statistic-free-talent-modeling-with-neural-player-embeddings

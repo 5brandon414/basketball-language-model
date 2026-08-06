@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reconstruct the training corpus from the public dataset files.
+"""Reconstruct the training corpus from a locally built dataset (see DATA.md).
 All scripts consume data via load_corpus(data_dir)."""
 import glob, json, os
 import numpy as np
@@ -7,10 +7,9 @@ import pandas as pd
 
 
 def _splits_path(data_dir, splits_file=None):
-    """splits_file overrides the default assignment; the paper's numbers use
-    the walk-forward fold files (fold{1,2,3}_splits.json), where every game
-    after the fold's cutoff that is not one of its 180 test games is labelled
-    'exclude' and therefore never trained on."""
+    """splits_file overrides the default splits.json; the paper's numbers use
+    the walk-forward fold files (data/fold{1,2,3}_splits.json), whose
+    'exclude' games are loaded but match no split, so nothing consumes them."""
     if splits_file is None:
         return os.path.join(data_dir, "splits.json")
     here = os.path.dirname(os.path.abspath(__file__))
@@ -27,8 +26,8 @@ def load_corpus(data_dir, splits_file=None):
     splits = json.load(open(_splits_path(data_dir, splits_file)))
     lu = pd.read_parquet(os.path.join(data_dir, "lineups.parquet"))
     lu_by_game = {g: d.sort_values("t_start_sec") for g, d in lu.groupby("game_id")}
-    # pregame available rosters (dressed lists) — the model may know who is
-    # available and who starts, never who actually enters or their minutes
+    # pregame available (dressed) rosters — never the list of players who
+    # actually appeared, which depends on the outcome
     ros = pd.read_parquet(os.path.join(data_dir, "rosters.parquet"))
     avail = {r.game_id: (sorted(str(p) for p in r.home_available),
                          sorted(str(p) for p in r.away_available))

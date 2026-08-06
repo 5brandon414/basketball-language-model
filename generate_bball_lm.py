@@ -15,41 +15,29 @@ import torch
 from train_bball_lm import BasketballLM, DT_MID
 import train_bball_lm as _tb
 
-DATA = "data"
 CKPT = Path("ckpt/best_model.pt")
 DT_MEANS = np.asarray(DT_MID)
-VIDX = {}; VOCAB = None
-NV = 0; PTS_H = PTS_A = IS_FT = None
-MAKES_H = MAKES_A = MISSES_H = MISSES_A = None
+VIDX = {}
+PTS_H = PTS_A = IS_FT = None
 MAXLEN = _tb.MAXLEN
 
 
 def init_tables(vocab):
-    """Vocab-agnostic token tables built from the CHECKPOINT's vocab
-    (supports 36- and 60-token vocabularies)."""
-    global VIDX, VOCAB, NV, PTS_H, PTS_A, IS_FT
-    global MAKES_H, MAKES_A, MISSES_H, MISSES_A
-    VOCAB = list(vocab); NV = len(vocab)
+    """Token tables built from the checkpoint's own vocab."""
+    global VIDX, PTS_H, PTS_A, IS_FT
+    NV = len(vocab)
     VIDX = {t: i for i, t in enumerate(vocab)}
     PTS_H = np.zeros(NV); PTS_A = np.zeros(NV)
     IS_FT = np.zeros(NV, bool)
-    MAKES_H, MAKES_A, MISSES_H, MISSES_A = [], [], [], []
-    global SIDE, AST_TOKS
-    SIDE = np.array([1 if t.startswith("H_") else (2 if t.startswith("A_") else 0)
-                     for t in vocab])
-    AST_TOKS = np.array([t.endswith("MAKE_AST") for t in vocab])
     for i, t in enumerate(vocab):
         if "FT_" in t:
             IS_FT[i] = True
         if "MAKE" in t:
             p = 3 if "3PT" in t else (1 if "FT_" in t else 2)
             (PTS_H if t.startswith("H_") else PTS_A)[i] = p
-            (MAKES_H if t.startswith("H_") else MAKES_A).append(i)
-        elif "MISS" in t:
-            (MISSES_H if t.startswith("H_") else MISSES_A).append(i)
 
 
-def make_rater(ck, pvocab):
+def make_rater(ck):
     rlut = ck.get("rlut")
     if rlut:
         k0 = next(iter(rlut)); pad = (0.0,) * len(rlut[k0])
@@ -60,8 +48,8 @@ def make_rater(ck, pvocab):
 
 @torch.no_grad()
 def kv_prefill(model, xseq):
-    """Multi-token cache build (the prefix pass): same math as the full
-    causal forward, returns per-layer (K,V) caches + last hidden state."""
+    """Prefix pass: build the per-layer (K,V) caches. Hand-rolled replica of
+    the encoder-layer math, so it must match forward() exactly."""
     x = xseq
     P = x.shape[1]
     mask = torch.triu(torch.full((P, P), float("-inf"), device=x.device), 1)
@@ -80,7 +68,7 @@ def kv_prefill(model, xseq):
         at = (torch.softmax(qh @ kh.transpose(-1, -2) / hd ** 0.5 + mask, -1) @ vh)
         x = x + sa.out_proj(at.transpose(1, 2).reshape(B, T, d))
         x = x + layer.linear2(layer.activation(layer.linear1(layer.norm2(x))))
-    return caches, x[:, -1:]
+    return caches
 
 
 def kv_step(model, caches, xn):
@@ -112,12 +100,9 @@ def kv_step(model, caches, xn):
 def rollout_batch(model, pvocab, timeline, gen, K, port, dev, window=0,
                   prefix=None, rate=None, season="*",
                   sd_scale=1.0, kv=False):
-    _dump = bool(os.environ.get("DUMP_TOKS"))
-    _dumpA, _dumpS = [], []
     ts_arr = np.array([s[0] for s in timeline])
     n_st = len(timeline)
     rate = rate or (lambda p, s: (0.0,) * port)
-
 
     L = MAXLEN
     tokB = torch.full((K, L), VIDX["PAD"], dtype=torch.long, device=dev)
@@ -130,7 +115,6 @@ def rollout_batch(model, pvocab, timeline, gen, K, port, dev, window=0,
     t = np.zeros(K); hp = np.zeros(K); ap = np.zeros(K)
     done = np.zeros(K, bool); early = np.zeros(K, bool)
     events = np.zeros(K); ftn = np.zeros(K)
-    m3 = np.full(K, np.nan)   # margin at Q3 end (lead-erosion diagnostic)
     base = [dict() for _ in range(K)]
     seg_end = np.zeros(K); cur_i = np.zeros(K, int)
 
@@ -212,44 +196,23 @@ def rollout_batch(model, pvocab, timeline, gen, K, port, dev, window=0,
             if j == 0:
                 caches = [None] * len(model.tr.layers)
             elif caches is None:      # prefix run: build the cache once
-                caches, _ = kv_prefill(model, emb_range(0, j))
+                caches = kv_prefill(model, emb_range(0, j))
             hid = kv_step(model, caches, emb_range(j, j + 1))
             lg = model.head(hid)[:, 0].float().cpu()
             dl = model.dt_head(hid)[:, 0].float().cpu()
         else:
             lo = max(0, T - window) if window else 0
-            logits, dtl, _actlg, *_ = model(
+            logits, dtl, *_ = model(
                 tokB[:, lo:T], h5B[:, lo:T], a5B[:, lo:T], ckB[:, lo:T],
                 hmB[:, lo:T], amB[:, lo:T], sdB[:, lo:T], hrB[:, lo:T], arB[:, lo:T],
                 pos_offset=lo)
             lg = logits[:, -1].float().cpu()
             dl = dtl[:, -1].float().cpu()
-            if _dump:
-                _al = _actlg[:, -1].float().cpu()
-                _as = model.last_ast[:, -1].float().cpu()
         pt = torch.softmax(lg, -1)
         pt[:, VIDX["PAD"]] = 0; pt[:, VIDX["BOS"]] = 0
         nxt = torch.multinomial(pt / pt.sum(1, keepdim=True), 1,
                                 generator=gen)[:, 0].numpy()
         dtb = torch.multinomial(torch.softmax(dl, -1), 1, generator=gen)[:, 0].numpy()
-        if _dump:
-            K_ = len(nxt)
-            actor_id = np.zeros(K_, np.int64); assist_id = np.zeros(K_, np.int64)
-            sides = SIDE[nxt]
-            for k in range(K_):
-                if sides[k] == 0 or not kv and False: continue
-                if sides[k] == 0: continue
-                sl = slice(0, 5) if sides[k] == 1 else slice(5, 10)
-                pa_ = torch.softmax(_al[k, sl], -1)
-                slot = int(torch.multinomial(pa_, 1, generator=gen))
-                five = (h5B if sides[k] == 1 else a5B)[k, j]
-                actor_id[k] = int(five[slot])
-                if AST_TOKS[nxt[k]]:
-                    aw = _as[k, sl].clone(); aw[slot] = -1e9
-                    ps_ = torch.softmax(aw, -1)
-                    aslot = int(torch.multinomial(ps_, 1, generator=gen))
-                    assist_id[k] = int(five[aslot])
-            _dumpA.append(actor_id); _dumpS.append(assist_id)
 
         nxt[done] = VIDX["PAD"]
         alive = ~done
@@ -259,32 +222,20 @@ def rollout_batch(model, pvocab, timeline, gen, K, port, dev, window=0,
         hp[act] += PTS_H[nxt[act]]; ap[act] += PTS_A[nxt[act]]
         events[act] += 1; ftn[act] += IS_FT[nxt[act]]
         t[act] += DT_MEANS[dtb[act]]
-        cross3 = np.isnan(m3) & (t > 2160.0)
-        m3[cross3] = (hp - ap)[cross3]
         done |= newly_eos | (t >= 2880.0)
         tokB[:, T] = torch.tensor(nxt, dtype=torch.long, device=dev)
         T += 1
-    m3[np.isnan(m3)] = (hp - ap)[np.isnan(m3)]
-    if _dump:
-        np.savez(os.environ["DUMP_TOKS"],
-                 toks=tokB[:, :T].cpu().numpy(),
-                 actors=np.stack(_dumpA, 1) if _dumpA else np.zeros((0, 0)),
-                 assists=np.stack(_dumpS, 1) if _dumpS else np.zeros((0, 0)))
-    return hp, ap, events, ftn, early, m3
-
-
+    return hp, ap, events, ftn, early
 
 
 @torch.no_grad()
 def rollout_lmsubs(model, pvocab, game, gen, K, port, dev, window=0, rate=None, season="*",
-                   exit_temp=1.0, ent_temp=1.0, prefix=None, kv=False):
+                   prefix=None, kv=False):
     """The LM drives its own rotations. Lineups start at the real starters
-    (or, with a prefix, the real halftime lineup); every sampled SUB token
-    triggers the exit pointer (who comes off) and the entrant pointer (who
-    checks in). Returns scores + per-player simulated seconds."""
-    R = 17    # available-roster width
-    _dump = False   # debug hook used only by rollout_batch
-    # starters first
+    (or, with a prefix, the real halftime lineup); on every sampled SUB token
+    the actor head picks who comes off and the entrant head picks who checks
+    in. Returns scores + per-player simulated seconds."""
+    R = 17    # available-roster slots per side
     def order(ids, starters):
         st = [str(p) for p in starters]
         rest = [str(p) for p in ids if str(p) not in st]
@@ -300,7 +251,6 @@ def rollout_lmsubs(model, pvocab, game, gen, K, port, dev, window=0, rate=None, 
     hr13[:nh] = torch.tensor([rate(str(p), season) for p in hro_ids])
     ar13[:na] = torch.tensor([rate(str(p), season) for p in aro_ids])
 
-    # starters = first row of the tokenized game (roster indices)
     def slots_of(five, ids):
         m = np.zeros(R, bool)
         for p in five:
@@ -328,8 +278,8 @@ def rollout_lmsubs(model, pvocab, game, gen, K, port, dev, window=0, rate=None, 
     hon = np.repeat(hon0[None], K, 0); aon = np.repeat(aon0[None], K, 0)
     T = 1
     if prefix is not None:
-        # halftime start: condition on the REAL first half (observed), then
-        # the LM drives every H2 rotation itself — no oracle timeline
+        # halftime start: condition on the real first half, then the LM
+        # drives every second-half rotation itself — no oracle timeline
         P = len(prefix["tok"])
         tokB[:, :P] = torch.tensor(prefix["tok"], dtype=torch.long,
                                    device=dev)[None]
@@ -341,10 +291,10 @@ def rollout_lmsubs(model, pvocab, game, gen, K, port, dev, window=0, rate=None, 
                                   device=dev)[None]
         hrB[:, :P] = torch.tensor(np.array([[rate(str(p), season) for p in row]
                                             for row in prefix["h5_raw"]]),
-                                  dtype=torch.float32)
+                                  dtype=torch.float32, device=dev)
         arB[:, :P] = torch.tensor(np.array([[rate(str(p), season) for p in row]
                                             for row in prefix["a5_raw"]]),
-                                  dtype=torch.float32)
+                                  dtype=torch.float32, device=dev)
         ckB[:, :P] = torch.tensor(prefix["ck"], dtype=torch.float32, device=dev)[None]
         sdB[:, :P] = torch.tensor(prefix["sd"], dtype=torch.float32, device=dev)[None]
         # roster-space prefix rows, permuted sorted-order -> starters-first
@@ -403,7 +353,7 @@ def rollout_lmsubs(model, pvocab, game, gen, K, port, dev, window=0, rate=None, 
                 xr, ph1, pa1 = emb_range(0, 1)
             elif caches is None:      # prefix run: build the cache once
                 xall, _, _ = emb_range(0, j)
-                caches, _ = kv_prefill(model, xall)
+                caches = kv_prefill(model, xall)
                 xr, ph1, pa1 = emb_range(j, j + 1)
             else:
                 xr, ph1, pa1 = emb_range(j, j + 1)
@@ -437,24 +387,6 @@ def rollout_lmsubs(model, pvocab, game, gen, K, port, dev, window=0, rate=None, 
         nxt = torch.multinomial(pt / pt.sum(1, keepdim=True), 1,
                                 generator=gen)[:, 0].numpy()
         dtb = torch.multinomial(torch.softmax(dl, -1), 1, generator=gen)[:, 0].numpy()
-        if _dump:
-            K_ = len(nxt)
-            actor_id = np.zeros(K_, np.int64); assist_id = np.zeros(K_, np.int64)
-            sides = SIDE[nxt]
-            for k in range(K_):
-                if sides[k] == 0 or not kv and False: continue
-                if sides[k] == 0: continue
-                sl = slice(0, 5) if sides[k] == 1 else slice(5, 10)
-                pa_ = torch.softmax(_al[k, sl], -1)
-                slot = int(torch.multinomial(pa_, 1, generator=gen))
-                five = (h5B if sides[k] == 1 else a5B)[k, j]
-                actor_id[k] = int(five[slot])
-                if AST_TOKS[nxt[k]]:
-                    aw = _as[k, sl].clone(); aw[slot] = -1e9
-                    ps_ = torch.softmax(aw, -1)
-                    aslot = int(torch.multinomial(ps_, 1, generator=gen))
-                    assist_id[k] = int(five[aslot])
-            _dumpA.append(actor_id); _dumpS.append(assist_id)
         if kv:
             act_lg = act_lg_full; eh_lg = eh_full; ea_lg = ea_full
         else:
@@ -472,20 +404,17 @@ def rollout_lmsubs(model, pvocab, game, gen, K, port, dev, window=0, rate=None, 
                 on = hon[k] if home_side else aon[k]
                 onk = np.where(on)[0][:5]
                 sl = slice(0, 5) if home_side else slice(5, 10)
-                # sample rotations (temperature-controlled)
                 ex_local = int(torch.multinomial(
-                    torch.softmax(act_lg[k][sl] / exit_temp, -1), 1,
-                    generator=gen))
+                    torch.softmax(act_lg[k][sl], -1), 1, generator=gen))
                 ex_idx = onk[ex_local] if ex_local < len(onk) else onk[0]
                 elg = (eh_lg if home_side else ea_lg)[k].clone()
                 elg[torch.tensor(on, dtype=torch.bool)] = -1e9
                 nlim = nh if home_side else na
                 elg[nlim:] = -1e9
-                in_idx = int(torch.multinomial(torch.softmax(elg / ent_temp, -1),
+                in_idx = int(torch.multinomial(torch.softmax(elg, -1),
                                                1, generator=gen))
                 if not on[in_idx]:
                     on[ex_idx] = False; on[in_idx] = True
-                (price.clear if False else (lambda: None))()
         hp[act] += PTS_H[nxt[act]]; ap[act] += PTS_A[nxt[act]]
         dt_s = DT_MEANS[dtb]
         for k in np.where(act)[0]:
@@ -513,17 +442,19 @@ def main():
     ap.add_argument("--lm-subs", action="store_true",
                     help="the LM drives its own rotations")
     ap.add_argument("--window", type=int, default=0,
-                    help="attend to only the last W events (0 = full)")
+                    help="attend to only the last W events (0 = full); "
+                         "not applied when --kv is set")
     ap.add_argument("--split", default="test",
-                    choices=["test", "val", "ttest", "all"],
+                    choices=["test", "val", "all"],
                     help="'all' ignores the split label and takes the games "
                          "listed in --gids-file (how the fold tables are run)")
     ap.add_argument("--kv", action="store_true",
-                    help="KV-cached generation (exact; pre-state only for now)")
+                    help="KV-cached generation (same math as the full forward)")
     ap.add_argument("--gids-file", default=None, help="restrict to game_ids listed in file")
     ap.add_argument("--sd-scale", type=float, default=1.0,
-                    help="scale the score-diff input at "
-                         "generation (0 = model can't see the lead)")
+                    help="scale the score-diff input at generation "
+                         "(0 = model can't see the lead); read only by the "
+                         "oracle-timeline path, not by --lm-subs")
     a = ap.parse_args()
     t0 = time.time()
 
@@ -542,9 +473,8 @@ def main():
     model = BasketballLM(len(ck["vocab"]), len(pvocab), d=_d, nlayers=_nl,
                          port=port).to(dev)
     model.load_state_dict(ck["model"], strict=False); model.eval()
-    rate0 = make_rater(ck, pvocab)
+    rate0 = make_rater(ck)
     gen = torch.Generator().manual_seed(a.seed)
-
 
     blob = None
     if a.state == "half" or a.lm_subs:
@@ -562,21 +492,18 @@ def main():
               "information). Diagnostic only; every number in the paper "
               "uses --lm-subs.", flush=True)
     rows = []
-    all_m3, all_mf = [], []   # per-rollout Q3/final margins (lead erosion)
     for n_g, (gid, g) in enumerate(stints.groupby("game_id", sort=False)):
         if n_g >= a.games: break
         g = g.sort_values("t_start_sec")
         season = gid[3:5]
-        # per-game card lookup (season/career fallback)
+        # card lookup bound to this game id
         rate = lambda p, s, _g=str(gid): (tuple(rate0(p, s, _g))
                                           + (0.0,) * port)[:port]
         timeline = []
         for r in g.itertuples(index=False):
             h5 = np.array([str(p) for p in r.home_lineup])
             a5 = np.array([str(p) for p in r.away_lineup])
-            rh = ra = 0.0
-            timeline.append((r.t_start_sec, r.duration_sec, h5, a5,
-                             1, rh, ra))
+            timeline.append((r.t_start_sec, r.duration_sec, h5, a5))
         prefix = None
         if a.state == "half" and blob is not None:
             gd = blob.get(gid)
@@ -599,7 +526,7 @@ def main():
             hpv, apv, hmn, amn, hid, aid = rollout_lmsubs(
                 model, pvocab, gd, gen, a.rollouts, port, dev, window=a.window,
                 rate=rate, season=season, prefix=prefix, kv=a.kv)
-            if prefix is None:      # full-game minutes gate (pregame only)
+            if prefix is None:      # minutes MAE only for full-game rollouts
                 act_h = np.zeros(len(hid)); act_a = np.zeros(len(aid))
                 for r_ in g.itertuples(index=False):
                     for p in r_.home_lineup:
@@ -612,25 +539,28 @@ def main():
                 mmae = np.nan
             ev = np.zeros(1); ft = np.zeros(1); early = np.zeros(1)
         else:
-            hpv, apv, ev, ft, early, m3s = rollout_batch(
+            hpv, apv, ev, ft, early = rollout_batch(
                 model, pvocab, timeline, gen, a.rollouts, port, dev,
                 window=a.window, prefix=prefix,
                 rate=rate, season=season, sd_scale=a.sd_scale, kv=a.kv)
-            all_m3.extend(m3s.tolist()); all_mf.extend((hpv - apv).tolist())
             mmae = np.nan
         if rows and len(rows) % 10 == 0:
             pd.DataFrame(rows).to_csv(
                 f"{os.path.dirname(a.ckpt)}/gen_partial.csv", index=False)
         rows.append({"game_id": gid, "mmae": mmae,
                      "pm": hpv.mean() - apv.mean(), "pt": hpv.mean() + apv.mean(),
+                     # win probability is the share of rollouts the home side wins
+                     "wp": float((hpv > apv).mean()),
                      "mstd": (hpv - apv).std(), "tstd": (hpv + apv).std(),
+                     # per-rollout margins, so interval coverage is checkable
+                     # without assuming the sampled spread is normal
+                     "margins": " ".join(f"{v:.0f}" for v in (hpv - apv)),
                      "hp": hpv.mean(), "ap": apv.mean(), "ev": ev.mean(),
                      "ft_share": ft.sum() / max(ev.sum(), 1),
                      "eos": early.mean(),
                      "am": float(g.home_pts.sum() - g.away_pts.sum()),
                      "at": float(g.home_pts.sum() + g.away_pts.sum())})
         if (n_g + 1) % 10 == 0:
-            # progress line
             pm = np.array([r["pm"] for r in rows]); am_ = np.array([r["am"] for r in rows])
             pt_ = np.array([r["pt"] for r in rows]); at_ = np.array([r["at"] for r in rows])
             mc = np.corrcoef(pm, am_)[0, 1] if pm.std() > 0 and am_.std() > 0 else float("nan")
@@ -644,23 +574,22 @@ def main():
 
     d = pd.DataFrame(rows)
     am, at_ = d["am"], d["at"]
-    print(f"\nSANITY: pts/side H {d.hp.mean():.1f} A {d.ap.mean():.1f} (real ~112) | "
-          f"events/gm {d.ev.mean():.0f} (real ~360) | FT {d.ft_share.mean():.1%} | "
-          f"early-EOS {d.eos.mean():.1%}")
+    sanity = f"\nSANITY: pts/side H {d.hp.mean():.1f} A {d.ap.mean():.1f}"
+    if not a.lm_subs:   # these counters are only filled by the batched path
+        sanity += (f" | events/gm {d.ev.mean():.0f}"
+                   f" | FT {d.ft_share.mean():.1%}"
+                   f" | early-EOS {d.eos.mean():.1%}")
+    print(sanity)
+    print(f"WIN PROB: mean home {d.wp.mean():.1%} | "
+          f"acc {((d.wp > 0.5) == (am > 0)).mean():.1%}")
     print(f"MARGIN: corr {np.corrcoef(d.pm, am)[0,1]:.3f} "
           f"acc {(np.sign(d.pm) == np.sign(am)).mean():.1%} "
-          f"MAE {(d.pm - am).abs().mean():.1f}   (E oracle: 0.454/66%/10.6)")
+          f"MAE {(d.pm - am).abs().mean():.1f}")
     print(f"TOTAL:  corr {np.corrcoef(d.pt, at_)[0,1]:.3f} "
           f"MAE {(d.pt - at_).abs().mean():.1f} bias {d.pt.mean() - at_.mean():+.1f}")
-    if a.lm_subs:
-        print(f"MINUTES: per-player MAE {d.mmae.mean():.2f} min   "
-              f"(naive last-5 baseline: 5.47)")
-    if len(all_m3) > 20 and np.std(all_m3) > 0:
-        print(f"LEAD EROSION: slope(final~Q3margin) "
-              f"{np.polyfit(all_m3, all_mf, 1)[0]:.3f}   "
-              f"(real ~0.95; sim baseline 0.79) | sd_scale {a.sd_scale}")
-    suffix = ""
-    name = f"gen_{a.split}_{a.state}{suffix}{'_lmsubs' if a.lm_subs else ''}.csv"
+    if a.lm_subs and d.mmae.notna().any():
+        print(f"MINUTES: per-player MAE {d.mmae.mean():.2f} min")
+    name = f"gen_{a.split}_{a.state}{'_lmsubs' if a.lm_subs else ''}.csv"
     d.to_csv(f"{os.path.dirname(a.ckpt)}/{name}", index=False)
     print(f"saved {name} ({time.time()-t0:.0f}s)")
 

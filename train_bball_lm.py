@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Train the Basketball LM: a causal transformer over play-by-play tokens.
 
-  python3 train_bball_lm.py --data-dir <dataset> [--smoke]
+  python3 train_bball_lm.py --data-dir <corpus> [--smoke]
+
+The defaults are not the paper's configuration; README.md has the per-fold
+flag recipe.
 """
 import argparse, json, time
 from loader import load_corpus
@@ -11,13 +14,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-DATA = "data"
 OUT = Path("ckpt")
-ROSTER_R = 17   # available-roster width (max dressed players per side)
-MAXLEN = 688    # longest corpus game is 671 tokens (multi-OT); the margin
-                # above it is headroom for generated rollouts. A learned
-                # positional table makes this a checkpoint dimension; the
-                # trainer aborts if any game exceeds it.
+ROSTER_R = 17   # available-roster slots per side
+MAXLEN = 688    # must exceed the longest game (the trainer aborts otherwise)
+                # with headroom for longer generated rollouts. The positional
+                # table is learned, so this is a checkpoint dimension.
 # time-to-next-event bins (seconds)
 DT_BOUNDS = [1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 17, 20, 24, 28, 33]
 DT_MID = np.array([0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 7, 9, 11, 13, 15.5, 18.5,
@@ -84,9 +85,6 @@ class GameDataset(torch.utils.data.Dataset):
             en[:T] = d["entrant"][:T]
         hr = np.zeros((MAXLEN, 5, self.port), np.float32); ar = np.zeros((MAXLEN, 5, self.port), np.float32)
         sea = d.get("season", "*"); gid = d.get("gid")
-        for k in range(5):
-            hr[:T, k] = self._rate(str(d["h5"][0, k]), sea, gid) if T else (0, 0)
-            ar[:T, k] = self._rate(str(d["a5"][0, k]), sea, gid) if T else (0, 0)
         for tt in range(T):
             for k in range(5):
                 hr[tt, k] = self._rate(str(d["h5"][tt, k]), sea, gid)
@@ -95,7 +93,7 @@ class GameDataset(torch.utils.data.Dataset):
             if np.random.random() < 0.5:
                 hr = hr + np.random.normal(0, 0.3, hr.shape).astype(np.float32)
                 ar = ar + np.random.normal(0, 0.3, ar.shape).astype(np.float32)
-            if np.random.random() < 0.1:      # rating dropout: survive blind
+            if np.random.random() < 0.1:      # card dropout
                 hr[:] = 0; ar[:] = 0
         mask = np.zeros(MAXLEN, np.float32); mask[:T] = 1.0
         if self.aug and np.random.random() < 0.5:   # home/away mirror
@@ -117,17 +115,15 @@ class GameDataset(torch.utils.data.Dataset):
 
 
 class BasketballLM(nn.Module):
-    def __init__(self, vocab, n_players, d=160, nlayers=5, nhead=4,
-                 warm_emb=None, eft=None, port=3):
+    def __init__(self, vocab, n_players, d=160, nlayers=5, nhead=4, port=3):
         super().__init__()
         self.tok = nn.Embedding(vocab, d)
         self.pos = nn.Embedding(MAXLEN, d)
+        # no warm start: player embeddings are learned from the play-by-play
+        # alone, never initialised from an external rating
         self.pemb = nn.Embedding(n_players + 1, 32, padding_idx=0)
-        if warm_emb is not None:                # start knowing who's who
-            with torch.no_grad():
-                self.pemb.weight.copy_(torch.tensor(warm_emb, dtype=torch.float32))
         self.port = port
-        self.pfuse = nn.Linear(33 + port, 32)   # [emb | minutes | knowledge port]
+        self.pfuse = nn.Linear(33 + port, 32)   # [emb 32 | minutes 1 | card dials]
         self.lineup = nn.Linear(64, d)          # [home-sum(32) | away-sum(32)]
         self.ctx = nn.Linear(2, d)              # [clock, score diff]
         layer = nn.TransformerEncoderLayer(d, nhead, 4 * d, dropout=0.1,
@@ -138,8 +134,11 @@ class BasketballLM(nn.Module):
         self.actor_q = nn.Linear(d, 32)         # WHO acts next (pointer)
         self.ent_q = nn.Linear(d, 32)           # WHO checks in (bench)
         self.ast_q = nn.Linear(d, 32)           # assister pointer
-        self.th = nn.Linear(32, 1)              # totals head
-        self.vh = nn.Linear(d, 1)               # live value head
+        # th/vh are never trained and never read: no loss term touches them
+        # and no readout script calls them. They are kept only because their
+        # weights are in every released checkpoint's state_dict.
+        self.th = nn.Linear(32, 1)              # unused (checkpoint ballast)
+        self.vh = nn.Linear(d, 1)               # unused (checkpoint ballast)
         self.mh = nn.Linear(32, 1)              # game-margin head
         self.pw = nn.Linear(32, 1)              # pregame win-prob head
         self.sr = nn.Linear(32, 1)              # self-rating head
@@ -163,7 +162,6 @@ class BasketballLM(nn.Module):
         x = (self.tok(tok) + self.pos(pos_idx)[None]
              + lu + self.ctx(torch.stack([ck, sd], -1)))
         x = self.tr(x, mask=self.cmask[:T, :T])
-        self.last_vh = self.vh(x).squeeze(-1)
         # actor pointer (10 on-court)
         cands = torch.cat([ph, pa], 2)                        # [B,T,10,32]
         actor = torch.einsum("btd,btkd->btk", self.actor_q(x), cands)
@@ -195,9 +193,7 @@ def dt_targets(ck, m):
 
 def sr_targets(tok, h5, a5, ck, m, ptsd):
     """Per-token label = its lineup-segment's margin rate (pts/min).
-    Predicting this from player fusions alone is the LM's joint-rate estimator —
-    the de-confounded joint estimation E performs externally. Segments
-    under 45s are masked (rate too noisy)."""
+    Segments under 45s are masked (rate too noisy)."""
     B, T = tok.shape
     dev_ = tok.device
     chg = torch.zeros(B, T, dtype=torch.bool, device=dev_)
@@ -238,7 +234,7 @@ def evaluate(model, loader, shuffle=False):
                   tok[:, 1:].reshape(-1))
         w = m[:, 1:].reshape(-1)
         tot += (loss * w).sum().item(); n += w.sum().item()
-        tb, tm = dt_targets(ck, m)
+        _, tm = dt_targets(ck, m)
         pred_dt = (torch.softmax(dtl[:, :-1], -1) * mid).sum(-1)
         true_dt = (ck[:, 1:] - ck[:, :-1]).clamp(min=0) * 2880.0
         dt_ae += ((pred_dt - true_dt).abs() * tm).sum().item()
@@ -284,11 +280,11 @@ def main():
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--data-dir", default="../sloan_hf_dataset",
-                    help="path to the public dataset directory")
+                    help="path to the corpus you built (see DATA.md)")
     ap.add_argument("--splits", default=None,
                     help="split-assignment JSON overriding splits.json; the "
                          "paper trains one model per walk-forward fold with "
-                         "fold1/fold2/fold3_splits.json")
+                         "data/fold{1,2,3}_splits.json")
     ap.add_argument("--d", type=int, default=160, help="model width")
     ap.add_argument("--layers", type=int, default=5, help="transformer layers")
     ap.add_argument("--maxlen", type=int, default=0,
@@ -308,20 +304,20 @@ def main():
     ap.add_argument("--ls", type=float, default=0.0,
                     help="label smoothing on the EVENT head CE only")
     ap.add_argument("--pw-w", type=float, default=0.0,
-                    help="pregame win-prob head weight (BCE on winner from "
-                         "roster fusion; winner trained in)")
+                    help="pregame win-prob head loss weight (0 = off); BCE on "
+                         "the final winner from the roster fusion")
     ap.add_argument("--mh-wpool", action="store_true",
-                    help="pool mh/pw roster fusion by softmax(mpg_l10 dial) "
-                         "instead of flat mean (needs the 15-dial card)")
+                    help="pool the mh/pw roster fusion by softmax over card "
+                         "dial 7 instead of a flat mean over the roster")
     ap.add_argument("--mh-cardonly", action="store_true",
                     help="card-only pregame head (the paper's recipe): the "
-                         "margin, win-prob and totals heads see ZEROED player "
+                         "margin and win-prob heads see ZEROED player "
                          "embeddings, so pregame forecasts read the knowledge "
                          "card alone and are identity-blind by construction; "
                          "event and pointer heads keep full embeddings")
     ap.add_argument("--sd-drop", type=float, default=0.0,
                     help="blank the score-diff input for this fraction "
-                         "of training games (reduces lead-erosion during generation)")
+                         "of training games")
     ap.add_argument("--card", nargs="?", const="player_card.parquet",
                     default="player_card.parquet",
                     help="player-card parquet in the dataset dir: per-"
@@ -354,7 +350,7 @@ def main():
     te = [g for g in games.values() if g["split"] == "test"]
     import pandas as _pd
     rlut = {}
-    if a.card:   # replace the ratings feed with the raw-stat card
+    if a.card:
         _c = _pd.read_parquet(f"{a.data_dir}/{a.card}")
         keycol = "key" if "key" in _c.columns else "season"
         ccols = sorted([c for c in _c.columns if c.startswith("card_")],
@@ -375,11 +371,8 @@ def main():
     print(f"games: train {len(tr)} val {len(va)} test {len(te)} | "
           f"players {len(pvocab)} | vocab {len(vocab)}", flush=True)
 
-    # player embeddings are random-init and learned from the play-by-play
-    # alone — the paper model uses no side features at initialization
-    warm = None
-
-    # empirical dt-bin means
+    # per-bin dt medians fit on train; saved in the checkpoint and used to
+    # de-bin sampled dt at generation
     dts, dbs = [], []
     for d in tr:
         dt = np.clip(np.diff(d["clock"]) * 2880.0, 0, None)
@@ -402,12 +395,12 @@ def main():
                                      batch_size=32)
 
     model = BasketballLM(len(vocab), len(pvocab), d=a.d, nlayers=a.layers,
-                         warm_emb=warm, port=port_w)
+                         port=port_w)
     dev = torch.device(a.device)
     model = model.to(dev)
     PTSD = torch.zeros(len(vocab), device=dev)
     for _i, _nm in enumerate(vocab):
-        if "MAKE" in _nm:   # substring: covers _MAKE_AST + 3PTC/3PTA too
+        if "MAKE" in _nm:   # substring test: also catches _MAKE_AST
             _p = 3 if "3PT" in _nm else (1 if "FT" in _nm else 2)
             PTSD[_i] = _p if _nm.startswith("H") else -_p
     if a.sr_w > 0:
@@ -469,10 +462,8 @@ def main():
             tb, _ = dt_targets(ck, m)
             loss_d = (ce(dtl[:, :-1].reshape(-1, dtl.shape[-1]),
                          tb.reshape(-1)) * w).sum() / w.sum()
-            # actor loss
             loss_a = ce(actl[:, :-1].reshape(-1, 10), ac[:, 1:].reshape(-1))
             loss_a = loss_a.sum() / max((ac[:, 1:] >= 0).sum(), 1)
-            # entrant loss
             is_h = (ac[:, 1:] < 5) & (ac[:, 1:] >= 0)
             en_t = en[:, 1:].clone()
             eh_t = torch.where(is_h & (en_t >= 0), en_t, torch.full_like(en_t, -100))
@@ -483,7 +474,6 @@ def main():
             loss = (bal("t", loss_t) + 0.5 * bal("d", loss_d)
                     + 0.5 * bal("a", loss_a) + 0.3 * bal("e", loss_e))
             if a.ast_w > 0:
-                # assister loss
                 loss_as = ce(model.last_ast[:, :-1].reshape(-1, 10),
                              ast_t[:, 1:].reshape(-1))
                 loss_as = loss_as.sum() / max((ast_t[:, 1:] >= 0).sum(), 1)
@@ -494,10 +484,10 @@ def main():
                     loss = loss + a.sr_w * bal("sr", nn.functional.huber_loss(
                         model.last_sr[sv_], st_[sv_]))
             if a.mh_w > 0 or a.pw_w > 0:
-                # margin / win-prob head loss
                 fm = (PTSD[tok] * m).sum(1) / 20.0
-                # card-only pregame head: identity is withheld from these
-                # heads at train time, so they cannot lean on embeddings
+                # --mh-cardonly: identity is withheld from these heads at
+                # train time, so they cannot lean on player embeddings.
+                # Readout code must zero the same slice or the two disagree.
                 _pe = ((lambda i: torch.zeros(*i.shape, 32, device=dev))
                        if a.mh_cardonly else model.pemb)
                 hf = model.pfuse(torch.cat([_pe(hro),
@@ -506,7 +496,6 @@ def main():
                      torch.full((*aro.shape, 1), 0.5, device=dev), ar13], -1))
                 hmask = (hro > 0).unsqueeze(-1); amask = (aro > 0).unsqueeze(-1)
                 if a.mh_wpool:
-                    # minutes-weighted pooling
                     wh_ = torch.softmax(torch.where(
                         hro > 0, hr13[..., 7], torch.full_like(hr13[..., 7], -1e9)), 1)
                     wa_ = torch.softmax(torch.where(
