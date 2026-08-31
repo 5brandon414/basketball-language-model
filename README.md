@@ -148,3 +148,4 @@ rules (tied at the horizon extends five minutes at a time, up to four);
 actual margins and totals include real overtime.
 
 MIT licensed — code and the `data/` files (our own outputs) alike.
+Related work and positioning in REFERENCES.md.
