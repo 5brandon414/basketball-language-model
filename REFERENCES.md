@@ -51,3 +51,26 @@
 12. "(batter|pitcher)2vec: Statistic-Free Talent Modeling With Neural
     Player Embeddings" (SSAC 2018). Learned player embeddings at Sloan.
     https://www.sloansportsconference.com/research-papers/batter-pitcher-2vec-statistic-free-talent-modeling-with-neural-player-embeddings
+
+## Added after the prior-art review (September 2026)
+
+- Bhat, Huang, Rodriguez. Learning Stochastic Models for Basketball Substitutions
+  from Play-by-Play Data. MLSA workshop at ECML-PKDD, 2015 (CEUR Vol-1970, paper 8).
+  Continuous-time Markov chain over five-man lineups; full-game simulation with
+  handcrafted rates, including a lineup-removal counterfactual. The closest prior
+  basketball model in which the model itself chooses who is on the floor.
+- Mendes-Neves, Meireles, Mendes-Moreira. Forecasting Events in Soccer Matches
+  Through Language. arXiv:2402.06820, 2024. Full-match event rollouts to outcome
+  probabilities; team-level, no player identity.
+- Hong et al. Modeling Matches as Language: A Generative Transformer Approach for
+  Counterfactual Player Valuation in Football (ScoutGPT). arXiv:2603.15212, 2026.
+  Decoder-only event model; lineups are user-specified and fixed during generation.
+- Yeung, Sit, Fujii. Transformer-based neural marked spatio-temporal point process
+  model for football match events (NMSTPP). arXiv:2302.09276; Applied Intelligence, 2025.
+- Lieder. NBA Game Simulation Using RNN and Adversarial Networks, Part 1. Medium,
+  2021/22. Word-level LSTM over a ~14-symbol NBA event vocabulary sampling whole
+  games; no players, lineups, or forecasts. Cited as public prior art.
+- Yeh, Rice, Dubin. Evaluating Real-Time Probabilistic Forecasts with Application to
+  NBA Outcome Prediction. The American Statistician 76(3), 2022.
+- Gneiting, Raftery. Strictly Proper Scoring Rules, Prediction, and Estimation.
+  JASA, 2007. (Coverage and CRPS conventions.)

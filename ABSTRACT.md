@@ -5,7 +5,7 @@
 A basketball game writes itself down as a document, each possession a
 sentence and each event a word. Forecasting rarely reads it whole, and standard live models move with score, clock and a pregame rating,
 not with the hundreds of events on the page. Event-stream models already
-exist for soccer and baseball, where the lineup is more static.
+exist for soccer and baseball, and they hold the lineup fixed.
 Basketball needs a model to keep choosing, and un-choosing, who is on
 the floor. We ask whether one model writing the game out can match the
 specialists.
