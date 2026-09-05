@@ -74,3 +74,8 @@
   NBA Outcome Prediction. The American Statistician 76(3), 2022.
 - Gneiting, Raftery. Strictly Proper Scoring Rules, Prediction, and Estimation.
   JASA, 2007. (Coverage and CRPS conventions.)
+- Hughes. An Approximate Dynamic Programming Approach to Determine the Optimal
+  Substitution Strategy for Basketball. PhD thesis, George Mason University, 2017.
+  Prescriptive lineup decisions under endurance uncertainty; not generative.
+- Romero, Mashayekhi, Lai, Van Roy et al. Next-Event Prediction in Soccer: Assessing
+  the Impact of Team and Player Information. Data Mining for Sports, Springer, 2025.
